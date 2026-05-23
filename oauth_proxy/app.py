@@ -22,7 +22,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from oauth_proxy import request_mapping, response_mapping, stream_mapping
 from oauth_proxy.auth import TokenError, TokenProvider
-from oauth_proxy.config import Config, load_config
+from oauth_proxy.config import Config, load_config, load_dotenv
 from oauth_proxy.models import ChatCompletionRequest, model_catalog
 
 
@@ -188,6 +188,7 @@ def main() -> None:
     """Console entry point: ``oauth-proxy``."""
     import uvicorn
 
+    load_dotenv()  # load .env from the working directory, if present
     cfg = load_config()
     uvicorn.run(build_app(cfg), host=cfg.host, port=cfg.port)
 

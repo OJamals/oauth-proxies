@@ -47,6 +47,17 @@ oauth-proxy               # serves on http://127.0.0.1:8787
 # or: python -m oauth_proxy.app
 ```
 
+On startup the server loads a **`.env`** file from the working directory if one
+is present (real environment variables take precedence). Put your token there:
+
+```bash
+# .env  (gitignored — never commit it)
+CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
+```
+
+See `.env.example`. `.env` loading happens only when you run the server, not
+when the package is imported (so tests never pick up a developer's `.env`).
+
 ### Configuration (environment variables)
 
 | Var | Default | Meaning |

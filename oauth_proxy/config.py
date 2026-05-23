@@ -6,7 +6,41 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
+
+
+def load_dotenv(path: str = ".env", *, override: bool = False) -> None:
+    """Minimal ``.env`` loader (no third-party dependency).
+
+    Populates ``os.environ`` from ``KEY=VALUE`` lines in ``path`` when the file
+    exists; a no-op otherwise. Supports ``export KEY=val``, ``#`` comments,
+    blank lines, and single/double-quoted values. Real environment variables
+    take precedence unless ``override=True`` (standard dotenv semantics).
+
+    Called from the server entry point (``app.main``) — NOT from ``load_config``
+    — so importing the app in tests never silently loads a developer's ``.env``.
+    """
+    p = Path(path)
+    if not p.exists():
+        return
+    for raw in p.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        if "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+            val = val[1:-1]
+        if not key:
+            continue
+        if override or key not in os.environ:
+            os.environ[key] = val
 
 
 @dataclass(frozen=True)
