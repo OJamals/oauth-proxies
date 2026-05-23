@@ -73,3 +73,38 @@ def test_tool_choice_none_drops_tools():
 def test_max_tokens_alias_and_passthrough():
     kwargs = rm.build_kwargs(_req(max_completion_tokens=321), default_model="claude-opus-4-7", default_reasoning_effort="off")
     assert kwargs["max_tokens"] == 321
+
+
+def _last_text_block(system):
+    return next(b for b in reversed(system) if isinstance(b, dict) and b.get("type") == "text")
+
+
+def test_prompt_cache_marks_last_system_block_by_default():
+    req = _req(messages=[{"role": "system", "content": "Be terse."}, {"role": "user", "content": "hi"}])
+    kwargs = rm.build_kwargs(req, default_model="claude-opus-4-7", default_reasoning_effort="off")
+    # is_oauth prepends the Claude Code block, so system is a list; the LAST
+    # text block carries the breakpoint (caches tools+system together).
+    assert _last_text_block(kwargs["system"])["cache_control"] == {"type": "ephemeral"}
+    # ...and the volatile messages are NOT marked.
+    for m in kwargs["messages"]:
+        content = m.get("content")
+        if isinstance(content, list):
+            assert all(not (isinstance(b, dict) and b.get("cache_control")) for b in content)
+
+
+def test_prompt_cache_disabled_adds_no_breakpoint():
+    req = _req(messages=[{"role": "system", "content": "Be terse."}, {"role": "user", "content": "hi"}])
+    kwargs = rm.build_kwargs(req, default_model="claude-opus-4-7", default_reasoning_effort="off", prompt_cache=False)
+    assert all(not (isinstance(b, dict) and b.get("cache_control")) for b in kwargs["system"])
+
+
+def test_prompt_cache_respects_existing_breakpoint():
+    # If the caller already placed a breakpoint, we must not add a second
+    # (could exceed the 4-breakpoint limit) — exactly one remains.
+    sys_blocks = [
+        {"type": "text", "text": "shared", "cache_control": {"type": "ephemeral"}},
+    ]
+    req = _req(messages=[{"role": "system", "content": sys_blocks}, {"role": "user", "content": "hi"}])
+    kwargs = rm.build_kwargs(req, default_model="claude-opus-4-7", default_reasoning_effort="off")
+    n = sum(1 for b in kwargs["system"] if isinstance(b, dict) and b.get("cache_control"))
+    assert n == 1

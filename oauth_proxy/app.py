@@ -13,6 +13,8 @@ the wiring simple and correct.
 from __future__ import annotations
 
 import json
+import logging
+import sys
 import time
 import uuid
 from typing import Any, Dict, Iterator, Optional
@@ -24,6 +26,31 @@ from oauth_proxy import request_mapping, response_mapping, stream_mapping
 from oauth_proxy.auth import TokenError, TokenProvider
 from oauth_proxy.config import Config, load_config, load_dotenv
 from oauth_proxy.models import ChatCompletionRequest, model_catalog
+
+log = logging.getLogger("oauth_proxy")
+
+
+def configure_logging(level: str = "INFO") -> None:
+    """Attach a stdout handler to the proxy's logger. Idempotent."""
+    lvl = getattr(logging, str(level).upper(), logging.INFO)
+    log.setLevel(lvl)
+    if not log.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s oauth-proxy %(message)s", "%H:%M:%S")
+        )
+        log.addHandler(handler)
+        log.propagate = False
+
+
+def _usage_summary(usage: Optional[Dict[str, Any]]) -> str:
+    """Compact, secret-free one-liner of token usage incl. cache activity."""
+    u = usage or {}
+    return (
+        f"prompt={u.get('input_tokens', 0)} completion={u.get('output_tokens', 0)} "
+        f"cache_read={u.get('cache_read_input_tokens', 0)} "
+        f"cache_write={u.get('cache_creation_input_tokens', 0)}"
+    )
 
 
 def _error_response(status: int, message: str, etype: str, code: Optional[str] = None) -> JSONResponse:
@@ -74,6 +101,7 @@ def build_app(config: Optional[Config] = None, token_provider: Optional[TokenPro
         request: Request,
         authorization: Optional[str] = Header(default=None),
     ):
+        t0 = time.monotonic()
         auth_err = _check_client_auth(authorization)
         if auth_err is not None:
             return auth_err
@@ -82,24 +110,29 @@ def build_app(config: Optional[Config] = None, token_provider: Optional[TokenPro
         try:
             req = ChatCompletionRequest.model_validate(raw)
         except Exception as exc:  # pydantic ValidationError
+            log.warning("400 invalid request: %s", exc)
             return _error_response(400, f"Invalid request: {exc}", "invalid_request_error")
 
         # Resolve credentials + build the upstream client.
         try:
             client = tokens.build_client()
         except TokenError as exc:
+            log.warning("401 token unavailable: %s", exc)
             return _error_response(401, str(exc), "authentication_error", "oauth_token_unavailable")
         except Exception as exc:  # pragma: no cover - unexpected client build failure
+            log.warning("500 client build failed: %s", exc)
             return _error_response(500, f"Failed to build Anthropic client: {exc}", "api_error")
 
         kwargs = request_mapping.build_kwargs(
             req,
             default_model=cfg.default_model,
             default_reasoning_effort=cfg.default_reasoning_effort,
+            prompt_cache=cfg.prompt_cache,
         )
         resolved_model = kwargs.get("model", req.model)
         completion_id = _new_completion_id()
         created = int(time.time())
+        log.info("→ POST /v1/chat/completions model=%s stream=%s", resolved_model, req.stream)
 
         if req.stream:
             return StreamingResponse(
@@ -111,6 +144,7 @@ def build_app(config: Optional[Config] = None, token_provider: Optional[TokenPro
                     created=created,
                     include_reasoning=cfg.include_reasoning,
                     include_usage=req.wants_usage(),
+                    started=t0,
                 ),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -121,9 +155,16 @@ def build_app(config: Optional[Config] = None, token_provider: Optional[TokenPro
             message = client.messages.create(**kwargs)
         except Exception as exc:
             status, etype, code = _classify_upstream_error(exc)
+            log.warning("← %s %s (%dms)", status, etype, int((time.monotonic() - t0) * 1000))
             return _error_response(status, str(exc), etype, code)
 
         dumped = message.model_dump() if hasattr(message, "model_dump") else dict(message)
+        log.info(
+            "← 200 model=%s %dms %s",
+            resolved_model,
+            int((time.monotonic() - t0) * 1000),
+            _usage_summary(dumped.get("usage")),
+        )
         body = response_mapping.anthropic_message_to_openai(
             dumped,
             model=resolved_model,
@@ -145,15 +186,28 @@ def _stream_sse(
     created: int,
     include_reasoning: bool,
     include_usage: bool,
+    started: Optional[float] = None,
 ) -> Iterator[str]:
     """Yield Server-Sent-Events for an OpenAI streaming chat completion."""
+    captured: Dict[str, Any] = {}
+
+    def _anth_events() -> Iterator[Dict[str, Any]]:
+        # Sniff usage off the raw events as they pass through (message_start
+        # carries input + cache tokens; message_delta carries output tokens).
+        for event in upstream:
+            d = event.model_dump() if hasattr(event, "model_dump") else event
+            if isinstance(d, dict):
+                etype = d.get("type")
+                if etype == "message_start":
+                    captured.update((d.get("message") or {}).get("usage") or {})
+                elif etype == "message_delta":
+                    captured.update(d.get("usage") or {})
+            yield d
+
     try:
         upstream = client.messages.create(**kwargs, stream=True)
-        anth_events = (
-            event.model_dump() if hasattr(event, "model_dump") else event for event in upstream
-        )
         for chunk in stream_mapping.anthropic_events_to_openai_chunks(
-            anth_events,
+            _anth_events(),
             model=model,
             completion_id=completion_id,
             created=created,
@@ -161,10 +215,13 @@ def _stream_sse(
             include_usage=include_usage,
         ):
             yield f"data: {json.dumps(chunk)}\n\n"
+        ms = int((time.monotonic() - started) * 1000) if started else -1
+        log.info("← 200 (stream) model=%s %dms %s", model, ms, _usage_summary(captured))
     except Exception as exc:
         # Mid-stream errors can't change the HTTP status; surface as an SSE
         # error event so the client sees what happened.
         _status, etype, code = _classify_upstream_error(exc)
+        log.warning("stream error: %s: %s", etype, exc)
         err = {"error": {"message": str(exc), "type": etype, "param": None, "code": code}}
         yield f"data: {json.dumps(err)}\n\n"
     yield "data: [DONE]\n\n"
@@ -190,6 +247,11 @@ def main() -> None:
 
     load_dotenv()  # load .env from the working directory, if present
     cfg = load_config()
+    configure_logging(cfg.log_level)
+    log.info(
+        "starting on %s:%d (prompt_cache=%s, default_model=%s)",
+        cfg.host, cfg.port, cfg.prompt_cache, cfg.default_model,
+    )
     uvicorn.run(build_app(cfg), host=cfg.host, port=cfg.port)
 
 

@@ -63,6 +63,12 @@ class Config:
     include_reasoning: bool = False
     # Read timeout (seconds) for upstream Anthropic calls.
     request_timeout_seconds: float = 900.0
+    # Inject one ephemeral prompt-cache breakpoint on the stable prefix
+    # (tools+system) of every request. Safe to leave on: worst case (prefix
+    # too small / volatile) it's a no-op, and it never marks the volatile turn.
+    prompt_cache: bool = True
+    # Logging verbosity for the server's own logger (DEBUG/INFO/WARNING/...).
+    log_level: str = "INFO"
 
 
 def _get_bool(name: str, default: bool) -> bool:
@@ -82,4 +88,6 @@ def load_config() -> Config:
         default_reasoning_effort=os.environ.get("DEFAULT_REASONING_EFFORT", "off").strip().lower(),
         include_reasoning=_get_bool("PROXY_INCLUDE_REASONING", False),
         request_timeout_seconds=float(os.environ.get("PROXY_REQUEST_TIMEOUT", "900")),
+        prompt_cache=_get_bool("PROXY_PROMPT_CACHE", True),
+        log_level=os.environ.get("LOG_LEVEL", "INFO"),
     )

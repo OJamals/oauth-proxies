@@ -33,6 +33,44 @@ def _reasoning_config(
     return {"enabled": True, "effort": str(effort).lower()}
 
 
+_EPHEMERAL = {"type": "ephemeral"}
+
+
+def _has_cache_control(blocks: Any) -> bool:
+    return isinstance(blocks, list) and any(
+        isinstance(b, dict) and b.get("cache_control") for b in blocks
+    )
+
+
+def _apply_prompt_cache_breakpoint(kwargs: Dict[str, Any]) -> None:
+    """Add ONE ephemeral cache breakpoint on the stable prefix.
+
+    Render order is tools -> system -> messages, so a breakpoint on the last
+    system block caches tools+system together — the safe, reusable prefix. We
+    never mark the messages (the volatile turn). No-op if the caller already
+    placed a breakpoint (avoids exceeding the 4-breakpoint limit).
+    """
+    system = kwargs.get("system")
+    if _has_cache_control(system) or _has_cache_control(kwargs.get("tools")):
+        return
+    if isinstance(system, str) and system.strip():
+        kwargs["system"] = [{"type": "text", "text": system, "cache_control": dict(_EPHEMERAL)}]
+        return
+    if isinstance(system, list) and system:
+        for block in reversed(system):
+            if isinstance(block, dict) and block.get("type") == "text":
+                block["cache_control"] = dict(_EPHEMERAL)
+                return
+        if isinstance(system[-1], dict):
+            system[-1]["cache_control"] = dict(_EPHEMERAL)
+        return
+    # No system prompt — fall back to caching the tool definitions, which
+    # render first in the prefix.
+    tools = kwargs.get("tools")
+    if isinstance(tools, list) and tools and isinstance(tools[-1], dict):
+        tools[-1]["cache_control"] = dict(_EPHEMERAL)
+
+
 def _tool_choice(req: ChatCompletionRequest) -> Optional[str]:
     tc = req.tool_choice
     if isinstance(tc, dict):
@@ -48,16 +86,19 @@ def build_kwargs(
     *,
     default_model: str,
     default_reasoning_effort: str,
+    prompt_cache: bool = True,
 ) -> Dict[str, Any]:
     """Return kwargs ready for ``anthropic.messages.create()``.
 
     The returned dict includes the resolved (normalized) Claude model under
-    ``"model"`` — callers echo that back in the OpenAI response.
+    ``"model"`` — callers echo that back in the OpenAI response. When
+    ``prompt_cache`` is True, one ephemeral cache breakpoint is added on the
+    stable prefix (tools+system).
     """
     model = _resolve_model(req.model, default_model)
     messages: List[Dict[str, Any]] = [m.model_dump(exclude_none=True) for m in req.messages]
 
-    return adapter.build_anthropic_kwargs(
+    kwargs = adapter.build_anthropic_kwargs(
         model=model,
         messages=messages,
         tools=req.tools,
@@ -67,3 +108,6 @@ def build_kwargs(
         is_oauth=True,
         base_url=None,
     )
+    if prompt_cache:
+        _apply_prompt_cache_breakpoint(kwargs)
+    return kwargs
