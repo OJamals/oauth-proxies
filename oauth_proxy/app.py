@@ -261,6 +261,28 @@ def build_app(
             "invalid_request_error", "unsupported_model",
         )
 
+    @app.post("/v1/images/generations")
+    def images_generations(
+        raw: Dict[str, Any],
+        request: Request,
+        authorization: Optional[str] = Header(default=None),
+    ):
+        auth_err = _check_client_auth(authorization)
+        if auth_err is not None:
+            return auth_err
+        model = raw.get("model", "") if isinstance(raw, dict) else ""
+        # Image generation is Grok-only here (Codex/Claude expose no image model),
+        # so unknown image models default to Grok.
+        provider = route_provider(model, default=GROK)
+        if provider != GROK:
+            return _error_response(
+                400,
+                f"Image generation is only available via Grok (grok-imagine-* models); "
+                f"model '{model}' routed to '{provider}'.",
+                "invalid_request_error", "unsupported_model",
+            )
+        return _grok_images(cfg, grok_tokens, raw)
+
     return app
 
 
@@ -577,6 +599,28 @@ def _grok_responses(cfg: Config, tokens, raw: Dict[str, Any]):
     except Exception as exc:
         status, etype, code = _classify_grok_error(exc)
         return _error_response(status, str(exc), etype, code)
+    return JSONResponse(content=out)
+
+
+def _grok_images(cfg: Config, tokens, raw: Dict[str, Any]):
+    """Grok-routed /v1/images/generations — passthrough to api.x.ai/v1/images/generations."""
+    try:
+        auth_headers = tokens.headers()
+    except grok_auth.TokenError as exc:
+        return _error_response(401, str(exc), "authentication_error", "oauth_token_unavailable")
+    body = dict(raw) if isinstance(raw, dict) else {}
+    if not str(body.get("model") or "").startswith("grok-imagine"):
+        body["model"] = "grok-imagine-image"
+    log.info("→ POST /v1/images/generations provider=grok model=%s", body.get("model"))
+    try:
+        out = grok_client.post_json(
+            "/images/generations", body, auth_headers=auth_headers, timeout=cfg.request_timeout_seconds
+        )
+    except Exception as exc:
+        status, etype, code = _classify_grok_error(exc)
+        log.warning("← %s grok images %s", status, etype)
+        return _error_response(status, str(exc), etype, code)
+    log.info("← 200 provider=grok images model=%s", body.get("model"))
     return JSONResponse(content=out)
 
 

@@ -162,6 +162,42 @@ def test_grok_token_error_returns_401(monkeypatch):
     assert r.json()["error"]["code"] == "oauth_token_unavailable"
 
 
+def test_grok_images_passthrough(monkeypatch):
+    seen = {}
+
+    def fake_post(path, body, *, auth_headers, timeout):
+        seen["path"], seen["model"] = path, body.get("model")
+        return {"created": 1, "data": [{"url": "https://imgen.x.ai/x.jpg"}]}
+
+    client = _client(monkeypatch, post=fake_post)
+    r = client.post("/v1/images/generations",
+                    json={"model": "grok-imagine-image", "prompt": "a red apple", "n": 1})
+    assert r.status_code == 200
+    assert r.json()["data"][0]["url"].startswith("https://imgen.x.ai/")
+    assert seen["path"] == "/images/generations" and seen["model"] == "grok-imagine-image"
+
+
+def test_images_default_model_substituted_for_non_grok(monkeypatch):
+    seen = {}
+
+    def fake_post(path, body, *, auth_headers, timeout):
+        seen["model"] = body.get("model")
+        return {"data": [{"url": "u"}]}
+
+    client = _client(monkeypatch, post=fake_post)
+    # "dall-e-3" has no known prefix -> images route defaults to Grok -> substitute.
+    r = client.post("/v1/images/generations", json={"model": "dall-e-3", "prompt": "x"})
+    assert r.status_code == 200
+    assert seen["model"] == "grok-imagine-image"
+
+
+def test_images_rejects_claude_model(monkeypatch):
+    client = _client(monkeypatch)
+    r = client.post("/v1/images/generations", json={"model": "claude-opus-4-8", "prompt": "x"})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "unsupported_model"
+
+
 def test_grok_models_listed_live_when_logged_in(monkeypatch):
     client = _client(monkeypatch, tokens=_FakeGrokTokens(logged_in=True), models=["grok-4.3", "grok-4.20-0309-reasoning"])
     ids = {m["id"] for m in client.get("/v1/models").json()["data"]}

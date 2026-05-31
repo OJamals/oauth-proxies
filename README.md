@@ -129,6 +129,13 @@ Endpoints:
 - `POST /v1/chat/completions` — stream + non-stream; routed by model name (all providers).
 - `POST /v1/responses` — native **OpenAI Responses API** for the Responses-native
   providers (Codex, Grok); the highest-fidelity path.
+- `POST /v1/images/generations` — **Grok only** (`grok-imagine-*` models), an
+  OpenAI-images-compatible passthrough to xAI. Example:
+  ```bash
+  curl http://127.0.0.1:8787/v1/images/generations -H 'Content-Type: application/json' \
+    -d '{"model":"grok-imagine-image","prompt":"a red apple on a white table"}'
+  # -> {"data":[{"url":"https://imgen.x.ai/..."}]}
+  ```
 - `GET /v1/models` — live catalog of your logged-in subscriptions.
 - `GET /health`.
 
