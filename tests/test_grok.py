@@ -101,13 +101,19 @@ class _FakeGrokTokens:
         return self._logged_in
 
 
+class _NoAnthropic:
+    def is_logged_in(self):
+        return False
+
+
 def _client(monkeypatch, *, tokens=None, post=None, stream=None, models=None):
     if post is not None:
         monkeypatch.setattr(grok_client, "post_json", post)
     if stream is not None:
         monkeypatch.setattr(grok_client, "stream_raw", stream)
     monkeypatch.setattr(grok_client, "list_models", lambda h, **kw: list(models or ["grok-4.3"]))
-    app = build_app(Config(), grok_token_provider=tokens or _FakeGrokTokens())
+    app = build_app(Config(), token_provider=_NoAnthropic(),
+                    grok_token_provider=tokens or _FakeGrokTokens())
     return TestClient(app)
 
 

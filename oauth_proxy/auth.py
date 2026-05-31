@@ -129,3 +129,12 @@ class TokenProvider:
             return bool(adapter.resolve_anthropic_token())
         except Exception:
             return False
+
+    def list_models(self, *, limit: int = 1000) -> list:
+        """Live Anthropic model ids via the OAuth client (for /v1/models).
+
+        Raises if the token can't be resolved or the call fails; callers fall
+        back to the curated list.
+        """
+        page = self.build_client().models.list(limit=limit)
+        return [m.id for m in page.data if getattr(m, "id", None)]

@@ -136,6 +136,10 @@ def build_app(
         live: Dict[str, Any] = {}
         if _logged_in(tokens):
             available.add("anthropic")
+            try:
+                live["anthropic"] = tokens.list_models()
+            except Exception as exc:  # fall back to the curated list
+                log.warning("anthropic live model list unavailable: %s", exc)
         if _logged_in(codex_tokens):
             available.add("codex")
             try:

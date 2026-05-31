@@ -63,9 +63,10 @@ KNOWN_MODELS: List[str] = [
     "claude-sonnet-4-5",
     "claude-haiku-4-5",
 ]
-# NOTE: older short names (claude-3-5-sonnet/haiku, claude-3-7-sonnet) were
-# dropped — the Anthropic API 404s the bare names. Pending the deferred Claude
-# work to fetch this list live (like Codex/Grok) instead of curating it.
+# FALLBACK only — /v1/models now fetches the live Anthropic list via the OAuth
+# client (TokenProvider.list_models), like Codex/Grok. Bare older names
+# (claude-3-5-sonnet/haiku, claude-3-7-sonnet) were dropped from this fallback
+# because the Anthropic API 404s them.
 
 # Codex (ChatGPT subscription) models. This is only a FALLBACK — /v1/models
 # fetches the real allowlist live from the backend per logged-in account. The

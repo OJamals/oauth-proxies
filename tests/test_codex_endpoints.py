@@ -13,6 +13,14 @@ from oauth_proxy.app import build_app
 from oauth_proxy.config import Config
 
 
+class _NoAnthropic:
+    """Anthropic provider stub that reports not-logged-in (keeps tests off the
+    real keychain / network)."""
+
+    def is_logged_in(self):
+        return False
+
+
 class _FakeCodexTokens:
     def __init__(self, *, error=None, logged_in=True):
         self._error = error
@@ -53,7 +61,8 @@ def _make_client(monkeypatch, events=None, *, tokens=None, stream_fn=None, model
         monkeypatch.setattr(codex_client, "stream_events", lambda body, **kw: iter(events or []))
     # Keep /v1/models hermetic: stub the live allowlist fetch (no network).
     monkeypatch.setattr(codex_client, "list_models", lambda headers, **kw: list(models or ["gpt-5.2"]))
-    app = build_app(Config(), codex_token_provider=tokens or _FakeCodexTokens())
+    app = build_app(Config(), token_provider=_NoAnthropic(),
+                    codex_token_provider=tokens or _FakeCodexTokens())
     return TestClient(app)
 
 
@@ -176,6 +185,23 @@ def test_usage_endpoint_aggregates_providers(monkeypatch):
     assert "leak@example.com" not in str(body)            # PII dropped
     assert body["grok"]["rate_limit"]["remaining_requests"] == 2400
     assert "anthropic" in body
+
+
+def test_anthropic_live_models_surfaced(monkeypatch):
+    class _Anthropic:
+        def is_logged_in(self):
+            return True
+
+        def list_models(self):
+            return ["claude-opus-4-8", "claude-opus-4-1-20250805"]  # incl. a dated id
+
+    monkeypatch.setattr(codex_client, "list_models", lambda h, **kw: [])
+    app = build_app(Config(), token_provider=_Anthropic(),
+                    codex_token_provider=_FakeCodexTokens(logged_in=False))
+    ids = {m["id"] for m in TestClient(app).get("/v1/models").json()["data"]}
+    # The dated id is NOT in the curated list -> proves the live list was used.
+    assert "claude-opus-4-1-20250805" in ids
+    assert all(m["owned_by"] == "anthropic" for m in TestClient(app).get("/v1/models").json()["data"])
 
 
 def test_models_catalog_omits_codex_when_not_logged_in(monkeypatch):
