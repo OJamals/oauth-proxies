@@ -137,6 +137,9 @@ Endpoints:
   # -> {"data":[{"url":"https://imgen.x.ai/..."}]}
   ```
 - `GET /v1/models` — live catalog of your logged-in subscriptions.
+- `GET /usage` — per-provider login status + rate-limit/usage. Codex reports
+  plan + 5h/weekly windows + credits (live, free); Grok/Claude report
+  `x-ratelimit-*` captured from your recent requests.
 - `GET /health`.
 
 ## Develop

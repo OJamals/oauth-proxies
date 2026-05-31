@@ -8,7 +8,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from oauth_proxy import codex_auth, codex_client
+from oauth_proxy import codex_auth, codex_client, usage
 from oauth_proxy.app import build_app
 from oauth_proxy.config import Config
 
@@ -155,6 +155,27 @@ def test_list_models_filters_hidden_models(monkeypatch):
 
     monkeypatch.setattr(codex_client.httpx, "get", lambda *a, **k: _Resp())
     assert codex_client.list_models({"Authorization": "Bearer t"}) == ["gpt-5.5", "gpt-5.2"]
+
+
+def test_usage_endpoint_aggregates_providers(monkeypatch):
+    monkeypatch.setattr(codex_client, "fetch_usage", lambda h, **kw: {
+        "email": "leak@example.com",  # must NOT appear in our output
+        "plan_type": "plus",
+        "rate_limit": {"limit_reached": False,
+                       "primary_window": {"used_percent": 6, "reset_at": 123},
+                       "secondary_window": {"used_percent": 1}},
+        "credits": {"has_credits": False},
+    })
+    usage.record("grok", {"rate_limit": {"remaining_requests": 2400, "limit_tokens": 15000000}})
+    client = _make_client(monkeypatch, _text_events(), tokens=_FakeCodexTokens(logged_in=True))
+    body = client.get("/usage").json()["providers"]
+
+    assert body["codex"]["logged_in"] is True
+    assert body["codex"]["plan_type"] == "plus"
+    assert body["codex"]["rate_limit"]["primary_window"]["used_percent"] == 6
+    assert "leak@example.com" not in str(body)            # PII dropped
+    assert body["grok"]["rate_limit"]["remaining_requests"] == 2400
+    assert "anthropic" in body
 
 
 def test_models_catalog_omits_codex_when_not_logged_in(monkeypatch):

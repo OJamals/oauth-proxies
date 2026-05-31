@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterator
 
 import httpx
 
+from oauth_proxy import usage
 from oauth_proxy.grok_auth import BASE_URL
 
 
@@ -29,6 +30,7 @@ def _headers(auth_headers: Dict[str, str]) -> Dict[str, str]:
 def post_json(path: str, body: Dict[str, Any], *, auth_headers: Dict[str, str], timeout: float) -> Dict[str, Any]:
     """POST a non-streaming request; return the upstream JSON (already OpenAI shape)."""
     resp = httpx.post(BASE_URL + path, json=body, headers=_headers(auth_headers), timeout=timeout)
+    usage.record_ratelimit_headers("grok", resp.headers)
     if resp.status_code >= 400:
         raise GrokHTTPError(resp.status_code, resp.text[:500] or f"HTTP {resp.status_code}")
     return resp.json()
@@ -39,6 +41,7 @@ def stream_raw(path: str, body: Dict[str, Any], *, auth_headers: Dict[str, str],
     headers = {**_headers(auth_headers), "Accept": "text/event-stream"}
     payload = {**body, "stream": True}
     with httpx.stream("POST", BASE_URL + path, json=payload, headers=headers, timeout=timeout) as resp:
+        usage.record_ratelimit_headers("grok", resp.headers)
         if resp.status_code >= 400:
             detail = resp.read().decode(errors="replace")
             raise GrokHTTPError(resp.status_code, detail[:500] or f"HTTP {resp.status_code}")

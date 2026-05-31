@@ -33,6 +33,7 @@ from oauth_proxy import (
     request_mapping,
     response_mapping,
     stream_mapping,
+    usage,
 )
 from oauth_proxy.auth import TokenError, TokenProvider
 from oauth_proxy.codex_auth import CodexTokenProvider
@@ -282,6 +283,42 @@ def build_app(
                 "invalid_request_error", "unsupported_model",
             )
         return _grok_images(cfg, grok_tokens, raw)
+
+    @app.get("/usage")
+    def usage_status(authorization: Optional[str] = Header(default=None)):
+        auth_err = _check_client_auth(authorization)
+        if auth_err is not None:
+            return auth_err
+        providers: Dict[str, Any] = {}
+
+        a_snap = usage.get("anthropic") or {}
+        providers["anthropic"] = {
+            "logged_in": _logged_in(tokens),
+            "rate_limit": a_snap.get("rate_limit"),
+        }
+
+        codex_info: Dict[str, Any] = {"logged_in": _logged_in(codex_tokens)}
+        if codex_info["logged_in"]:
+            try:
+                u = codex_client.fetch_usage(codex_tokens.headers())
+                rl = u.get("rate_limit") or {}
+                codex_info["plan_type"] = u.get("plan_type")
+                codex_info["rate_limit"] = {
+                    "limit_reached": rl.get("limit_reached"),
+                    "primary_window": rl.get("primary_window"),
+                    "secondary_window": rl.get("secondary_window"),
+                }
+                codex_info["credits"] = u.get("credits")
+            except Exception as exc:
+                codex_info["error"] = str(exc)
+        providers["codex"] = codex_info
+
+        g_snap = usage.get("grok") or {}
+        providers["grok"] = {
+            "logged_in": _logged_in(grok_tokens),
+            "rate_limit": g_snap.get("rate_limit"),
+        }
+        return {"providers": providers}
 
     return app
 

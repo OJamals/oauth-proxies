@@ -19,6 +19,7 @@ from oauth_proxy.codex_auth import (
     MODELS_ENDPOINT,
     ORIGINATOR,
     RESPONSES_ENDPOINT,
+    USAGE_ENDPOINT,
 )
 
 # A Codex-CLI-style User-Agent; the subscription backend expects requests that
@@ -148,3 +149,22 @@ def list_models(
         for m in data.get("models", [])
         if isinstance(m, dict) and m.get("slug") and m.get("visibility") != "hide"
     ]
+
+
+def fetch_usage(
+    auth_headers: Dict[str, str],
+    *,
+    timeout: float = 15.0,
+    url: str = USAGE_ENDPOINT,
+    client_version: str = CLIENT_VERSION,
+) -> Dict[str, Any]:
+    """Fetch the ChatGPT account's Codex usage (plan, rate-limit windows, credits).
+
+    Free (no inference). Raises ``CodexHTTPError`` on a non-2xx.
+    """
+    headers = {**_transport_headers(), **auth_headers}
+    headers["Accept"] = "application/json"
+    resp = httpx.get(url, params={"client_version": client_version}, headers=headers, timeout=timeout)
+    if resp.status_code >= 400:
+        raise CodexHTTPError(resp.status_code, resp.text[:300] or f"HTTP {resp.status_code}")
+    return resp.json()

@@ -71,6 +71,9 @@ RESPONSES_ENDPOINT = f"{RESPONSES_BASE_URL}/responses"
 # inference endpoint accepts all of them regardless, so we send a high version
 # to surface everything the account can actually use.
 MODELS_ENDPOINT = f"{RESPONSES_BASE_URL}/models"
+# Free usage endpoint: plan, rate-limit windows (5h primary / weekly secondary),
+# credits. No inference cost.
+USAGE_ENDPOINT = f"{RESPONSES_BASE_URL}/usage"
 CLIENT_VERSION = "1.0.0"
 
 # id_token JWT claim namespace -> chatgpt_account_id (codex-rs/login/token_data.rs)
