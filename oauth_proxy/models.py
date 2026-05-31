@@ -67,13 +67,11 @@ KNOWN_MODELS: List[str] = [
     "claude-3-5-haiku",
 ]
 
-# Codex (ChatGPT subscription) models. The subscription backend's accepted set
-# can drift; clients may request any gpt-*/o*/codex-* name and it is forwarded.
+# Codex (ChatGPT subscription) models. This is only a FALLBACK — /v1/models
+# fetches the real allowlist live from the backend per logged-in account. The
+# accepted set is account/client-specific and drifts over time.
 CODEX_MODELS: List[str] = [
-    "gpt-5-codex",
-    "gpt-5",
-    "o3",
-    "o4-mini",
+    "gpt-5.2",
 ]
 
 # Grok (SuperGrok subscription) models, current as of 2026-05; retired slugs
@@ -93,20 +91,28 @@ _CATALOG = {
 }
 
 
-def model_catalog(available: Optional[Any] = None) -> Dict[str, Any]:
+def model_catalog(
+    available: Optional[Any] = None,
+    live: Optional[Dict[str, List[str]]] = None,
+) -> Dict[str, Any]:
     """Return the OpenAI ``GET /v1/models`` payload.
 
     ``available`` is an iterable of logged-in provider ids
     (``{"anthropic", "codex", "grok"}``); only those providers' models are
     listed, so the catalog reflects which subscriptions you can actually use.
     When ``None``, every provider is listed (back-compat default).
+
+    ``live`` maps a provider id to model ids fetched live from that provider's
+    backend; when present for a provider, it replaces the curated fallback so
+    the catalog reflects the upstream's real allowlist.
     """
     selected = set(_CATALOG) if available is None else set(available)
+    live = live or {}
     created = int(time.time())
-    data = [
-        {"id": m, "object": "model", "created": created, "owned_by": owner}
-        for pid, (owner, models) in _CATALOG.items()
-        if pid in selected
-        for m in models
-    ]
+    data = []
+    for pid, (owner, curated) in _CATALOG.items():
+        if pid not in selected:
+            continue
+        for m in live.get(pid) or curated:
+            data.append({"id": m, "object": "model", "created": created, "owned_by": owner})
     return {"object": "list", "data": data}

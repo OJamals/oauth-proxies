@@ -103,6 +103,16 @@ def test_openai_model_passed_through():
     assert body["model"] == "o3-mini"
 
 
+def test_default_instructions_when_no_system_message():
+    # The Codex backend rejects requests without a non-empty instructions field.
+    body = reqm.build_responses_body(
+        _req(messages=[{"role": "user", "content": "hi"}]),
+        default_model="gpt-5.2",
+        stream=False,
+    )
+    assert body["instructions"] == reqm.DEFAULT_INSTRUCTIONS
+
+
 # ── Response mapping (non-stream) ─────────────────────────────────────────────
 
 def test_text_response_maps_to_content():

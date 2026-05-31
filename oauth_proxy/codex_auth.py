@@ -64,6 +64,10 @@ ORIGINATOR = "codex_cli_rs"
 # codex-rs/model-provider-info: CHATGPT_CODEX_BASE_URL + "/responses".
 RESPONSES_BASE_URL = "https://chatgpt.com/backend-api/codex"
 RESPONSES_ENDPOINT = f"{RESPONSES_BASE_URL}/responses"
+# Live model allowlist for the logged-in ChatGPT account (requires a
+# ``client_version`` query param). Verified live: returns the accepted slugs.
+MODELS_ENDPOINT = f"{RESPONSES_BASE_URL}/models"
+CLIENT_VERSION = "0.20.0"
 
 # id_token JWT claim namespace -> chatgpt_account_id (codex-rs/login/token_data.rs)
 _AUTH_CLAIM = "https://api.openai.com/auth"

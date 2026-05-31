@@ -16,6 +16,10 @@ from oauth_proxy.models import ChatCompletionRequest
 
 _OFF_EFFORTS = {None, "", "off", "none"}
 _SYSTEM_ROLES = {"system", "developer"}
+# The Codex subscription backend rejects requests without a non-empty top-level
+# ``instructions`` ("Instructions are required"). Used when the client sends no
+# system/developer message.
+DEFAULT_INSTRUCTIONS = "You are a helpful assistant."
 
 
 def _looks_like_openai(name: str) -> bool:
@@ -167,9 +171,8 @@ def build_responses_body(
         "store": False,
         "stream": stream,
     }
-    instructions = _instructions(messages)
-    if instructions:
-        body["instructions"] = instructions
+    # Always present and non-empty (the subscription backend requires it).
+    body["instructions"] = _instructions(messages) or DEFAULT_INSTRUCTIONS
     tools = _tools(req.tools)
     if tools:
         body["tools"] = tools

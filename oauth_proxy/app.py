@@ -123,13 +123,19 @@ def build_app(
         auth_err = _check_client_auth(authorization)
         if auth_err is not None:
             return auth_err
-        # Only advertise models for subscriptions that are actually logged in.
+        # Only advertise models for subscriptions that are actually logged in,
+        # and fetch each provider's real allowlist live where supported.
         available = set()
+        live: Dict[str, Any] = {}
         if _logged_in(tokens):
             available.add("anthropic")
         if _logged_in(codex_tokens):
             available.add("codex")
-        return model_catalog(available)
+            try:
+                live["codex"] = codex_client.list_models(codex_tokens.headers(), timeout=15)
+            except Exception as exc:  # fall back to the curated list
+                log.warning("codex live model list unavailable: %s", exc)
+        return model_catalog(available, live)
 
     @app.post("/v1/chat/completions")
     def chat_completions(

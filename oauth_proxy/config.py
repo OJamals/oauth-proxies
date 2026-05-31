@@ -73,7 +73,7 @@ class Config:
     # (claude*/gpt*/o*/codex*/grok*). One of {anthropic, codex, grok}.
     default_provider: str = "anthropic"
     # Substituted when a Codex-routed request carries a non-OpenAI model name.
-    codex_default_model: str = "gpt-5-codex"
+    codex_default_model: str = "gpt-5.2"
     # Substituted when a Grok-routed request carries a non-Grok model name.
     grok_default_model: str = "grok-4.3"
 
@@ -98,6 +98,6 @@ def load_config() -> Config:
         prompt_cache=_get_bool("PROXY_PROMPT_CACHE", True),
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
         default_provider=os.environ.get("PROXY_DEFAULT_PROVIDER", "anthropic").strip().lower(),
-        codex_default_model=os.environ.get("CODEX_DEFAULT_MODEL", "gpt-5-codex"),
+        codex_default_model=os.environ.get("CODEX_DEFAULT_MODEL", "gpt-5.2"),
         grok_default_model=os.environ.get("GROK_DEFAULT_MODEL", "grok-4.3"),
     )

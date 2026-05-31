@@ -28,24 +28,31 @@ class _FakeCodexTokens:
 
 
 def _text_events():
+    """Mirrors the real Codex backend: text via deltas, the finalized message in
+    output_item.done, and an EMPTY output in response.completed (usage only)."""
+    mid = "msg_1"
     return [
         {"type": "response.created", "response": {"id": "resp_1"}},
-        {"type": "response.output_text.delta", "delta": "Hi"},
-        {"type": "response.output_text.delta", "delta": " there"},
+        {"type": "response.output_item.added", "output_index": 0,
+         "item": {"id": mid, "type": "message", "role": "assistant", "content": []}},
+        {"type": "response.output_text.delta", "item_id": mid, "delta": "Hi"},
+        {"type": "response.output_text.delta", "item_id": mid, "delta": " there"},
+        {"type": "response.output_item.done", "output_index": 0,
+         "item": {"id": mid, "type": "message", "role": "assistant",
+                  "content": [{"type": "output_text", "text": "Hi there"}]}},
         {"type": "response.completed", "response": {
-            "id": "resp_1", "status": "completed",
-            "output": [{"type": "message", "role": "assistant",
-                        "content": [{"type": "output_text", "text": "Hi there"}]}],
-            "usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
-        }},
+            "id": "resp_1", "status": "completed", "output": [],
+            "usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}}},
     ]
 
 
-def _make_client(monkeypatch, events=None, *, tokens=None, stream_fn=None):
+def _make_client(monkeypatch, events=None, *, tokens=None, stream_fn=None, models=None):
     if stream_fn is not None:
         monkeypatch.setattr(codex_client, "stream_events", stream_fn)
     else:
         monkeypatch.setattr(codex_client, "stream_events", lambda body, **kw: iter(events or []))
+    # Keep /v1/models hermetic: stub the live allowlist fetch (no network).
+    monkeypatch.setattr(codex_client, "list_models", lambda headers, **kw: list(models or ["gpt-5.2"]))
     app = build_app(Config(), codex_token_provider=tokens or _FakeCodexTokens())
     return TestClient(app)
 
@@ -124,11 +131,12 @@ def test_codex_backend_403_maps_to_permission_error(monkeypatch):
     assert resp.json()["error"]["code"] == "subscription_not_entitled"
 
 
-def test_models_catalog_lists_codex_only_when_logged_in(monkeypatch):
-    # Logged-in Codex provider -> codex models advertised.
-    client = _make_client(monkeypatch, _text_events(), tokens=_FakeCodexTokens(logged_in=True))
+def test_models_catalog_lists_live_codex_models_when_logged_in(monkeypatch):
+    # Logged-in Codex provider -> live-fetched codex models advertised.
+    client = _make_client(monkeypatch, _text_events(),
+                          tokens=_FakeCodexTokens(logged_in=True), models=["gpt-5.2"])
     ids = {m["id"] for m in client.get("/v1/models").json()["data"]}
-    assert "gpt-5-codex" in ids
+    assert "gpt-5.2" in ids
     # Grok is not wired into this server yet, so it must NOT be advertised.
     assert "grok-4.3" not in ids
 

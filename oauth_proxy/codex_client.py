@@ -14,7 +14,12 @@ from typing import Any, Dict, Iterator, Optional
 
 import httpx
 
-from oauth_proxy.codex_auth import RESPONSES_ENDPOINT, ORIGINATOR
+from oauth_proxy.codex_auth import (
+    CLIENT_VERSION,
+    MODELS_ENDPOINT,
+    ORIGINATOR,
+    RESPONSES_ENDPOINT,
+)
 
 # A Codex-CLI-style User-Agent; the subscription backend expects requests that
 # look like the official client. Not a secret; version is cosmetic.
@@ -82,23 +87,59 @@ def stream_events(
 
 
 def collect_final(events: Iterator[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Drain an event stream and return the final Responses object.
+    """Drain an event stream and return a complete Responses object.
 
-    Reads the ``response`` payload from ``response.completed``. Raises the
-    stream error on ``response.failed`` / ``error``.
+    The Codex backend streams finalized items via ``response.output_item.done``
+    and sends usage in ``response.completed`` with an EMPTY ``output``. So we
+    assemble ``output`` from the per-item ``done`` events and merge usage/status
+    from ``completed`` (falling back to the completed snapshot's own ``output``
+    if a backend ever populates it). Raises on ``response.failed`` / ``error``.
     """
     from oauth_proxy.codex_stream_mapping import CodexStreamError
 
-    final: Optional[Dict[str, Any]] = None
+    completed: Optional[Dict[str, Any]] = None
+    items: list = []
     for ev in events:
         if not isinstance(ev, dict):
             continue
         etype = ev.get("type")
-        if etype == "response.completed":
-            final = ev.get("response")
+        if etype == "response.output_item.done":
+            item = ev.get("item")
+            if item:
+                items.append(item)
+        elif etype == "response.completed":
+            completed = ev.get("response") or {}
         elif etype in {"response.failed", "error"}:
             resp = ev.get("response") or {}
             err = resp.get("error") or ev.get("error") or {}
             msg = err.get("message") if isinstance(err, dict) else str(err)
             raise CodexStreamError(msg or "responses stream failed")
+
+    if completed is None and not items:
+        return None
+    final = dict(completed or {})
+    if not final.get("output"):
+        final["output"] = items
     return final
+
+
+def list_models(
+    auth_headers: Dict[str, str],
+    *,
+    timeout: float = 15.0,
+    url: str = MODELS_ENDPOINT,
+    client_version: str = CLIENT_VERSION,
+) -> list:
+    """Fetch the live model allowlist for the logged-in ChatGPT account.
+
+    Returns the accepted model slugs. Raises ``CodexHTTPError`` on a non-2xx.
+    """
+    headers = {**_transport_headers(), **auth_headers}
+    headers["Accept"] = "application/json"
+    resp = httpx.get(
+        url, params={"client_version": client_version}, headers=headers, timeout=timeout
+    )
+    if resp.status_code >= 400:
+        raise CodexHTTPError(resp.status_code, resp.text[:300] or f"HTTP {resp.status_code}")
+    data = resp.json()
+    return [m["slug"] for m in data.get("models", []) if isinstance(m, dict) and m.get("slug")]
