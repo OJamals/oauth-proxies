@@ -369,6 +369,11 @@ class CodexTokenProvider:
         self._record = refreshed
         return refreshed["access_token"]
 
+    def is_logged_in(self) -> bool:
+        """Cheap, local check: is a stored Codex credential present? (no network)"""
+        record = self._record or read_credentials()
+        return bool(record and record.get("access_token"))
+
     def account_id(self) -> Optional[str]:
         record = self._record or read_credentials() or {}
         return record.get("account_id") or _account_id_from_id_token(record.get("id_token"))

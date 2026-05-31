@@ -69,6 +69,13 @@ class Config:
     prompt_cache: bool = True
     # Logging verbosity for the server's own logger (DEBUG/INFO/WARNING/...).
     log_level: str = "INFO"
+    # Provider used when a requested model name doesn't match a known prefix
+    # (claude*/gpt*/o*/codex*/grok*). One of {anthropic, codex, grok}.
+    default_provider: str = "anthropic"
+    # Substituted when a Codex-routed request carries a non-OpenAI model name.
+    codex_default_model: str = "gpt-5-codex"
+    # Substituted when a Grok-routed request carries a non-Grok model name.
+    grok_default_model: str = "grok-4.3"
 
 
 def _get_bool(name: str, default: bool) -> bool:
@@ -90,4 +97,7 @@ def load_config() -> Config:
         request_timeout_seconds=float(os.environ.get("PROXY_REQUEST_TIMEOUT", "900")),
         prompt_cache=_get_bool("PROXY_PROMPT_CACHE", True),
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
+        default_provider=os.environ.get("PROXY_DEFAULT_PROVIDER", "anthropic").strip().lower(),
+        codex_default_model=os.environ.get("CODEX_DEFAULT_MODEL", "gpt-5-codex"),
+        grok_default_model=os.environ.get("GROK_DEFAULT_MODEL", "grok-4.3"),
     )

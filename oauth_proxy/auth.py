@@ -115,3 +115,17 @@ class TokenProvider:
         return adapter.build_anthropic_client(
             self.get_token(), base_url=None, timeout=self.timeout
         )
+
+    def is_logged_in(self) -> bool:
+        """Cheap, local, no-network check: is an Anthropic credential present?
+
+        Used to decide whether to advertise Claude models at ``/v1/models``.
+        Counts an expired-but-refreshable token as logged in (does not validate
+        expiry or hit the network).
+        """
+        try:
+            if adapter.read_claude_code_credentials():
+                return True
+            return bool(adapter.resolve_anthropic_token())
+        except Exception:
+            return False

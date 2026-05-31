@@ -52,9 +52,8 @@ class ChatCompletionRequest(_Lenient):
 
 
 # ── Served model catalog ──────────────────────────────────────────────────
-# Surfaced at GET /v1/models. Kept small and Claude-only since the OAuth
-# subscription path only reaches native Anthropic models. IDs match what the
-# Anthropic Messages API accepts.
+# Surfaced at GET /v1/models. Grouped by the subscription backend that serves
+# them; the proxy routes a request to a backend by the model-name prefix.
 KNOWN_MODELS: List[str] = [
     "claude-opus-4-8",
     "claude-opus-4-7",
@@ -68,14 +67,46 @@ KNOWN_MODELS: List[str] = [
     "claude-3-5-haiku",
 ]
 
+# Codex (ChatGPT subscription) models. The subscription backend's accepted set
+# can drift; clients may request any gpt-*/o*/codex-* name and it is forwarded.
+CODEX_MODELS: List[str] = [
+    "gpt-5-codex",
+    "gpt-5",
+    "o3",
+    "o4-mini",
+]
 
-def model_catalog() -> Dict[str, Any]:
-    """Return the OpenAI ``GET /v1/models`` list payload."""
+# Grok (SuperGrok subscription) models, current as of 2026-05; retired slugs
+# (grok-4, grok-code-fast, ...) are remapped to grok-4.3 server-side by xAI.
+GROK_MODELS: List[str] = [
+    "grok-4.3",
+    "grok-4.20-0309-reasoning",
+    "grok-4.20-0309-non-reasoning",
+    "grok-4.20-multi-agent-0309",
+]
+
+# provider id -> (OpenAI ``owned_by`` label, curated model ids)
+_CATALOG = {
+    "anthropic": ("anthropic", KNOWN_MODELS),
+    "codex": ("openai", CODEX_MODELS),
+    "grok": ("xai", GROK_MODELS),
+}
+
+
+def model_catalog(available: Optional[Any] = None) -> Dict[str, Any]:
+    """Return the OpenAI ``GET /v1/models`` payload.
+
+    ``available`` is an iterable of logged-in provider ids
+    (``{"anthropic", "codex", "grok"}``); only those providers' models are
+    listed, so the catalog reflects which subscriptions you can actually use.
+    When ``None``, every provider is listed (back-compat default).
+    """
+    selected = set(_CATALOG) if available is None else set(available)
     created = int(time.time())
-    return {
-        "object": "list",
-        "data": [
-            {"id": m, "object": "model", "created": created, "owned_by": "anthropic"}
-            for m in KNOWN_MODELS
-        ],
-    }
+    data = [
+        {"id": m, "object": "model", "created": created, "owned_by": owner}
+        for pid, (owner, models) in _CATALOG.items()
+        if pid in selected
+        for m in models
+    ]
+    return {"object": "list", "data": data}
