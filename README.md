@@ -1,14 +1,24 @@
 # oauth-proxies
 
-A small, **local, single-user** server that exposes an **OpenAI-compatible
-`/v1/chat/completions` API** and forwards requests to Claude using your **Claude
-Code OAuth / subscription token**. Point any OpenAI client (aider, Continue,
-LibreChat, the `openai` SDK, plain `curl`) at it and talk to Claude.
+A small, **local, single-user** server that exposes an **OpenAI-compatible API**
+and forwards requests to your AI **subscriptions** via their OAuth login — no API
+keys. Point any OpenAI client (aider, Continue, LibreChat, the `openai` SDK, plain
+`curl`) at it and talk to:
 
-It includes a vendored Anthropic-Messages adapter (see
-`THIRD_PARTY_NOTICES.md` for attribution) for the OpenAI→Anthropic
-request translation and the OAuth client identity, and adds the
-Anthropic→OpenAI **response** translation (streaming and non-streaming).
+| Provider | Subscription | Models (examples) | Reached via |
+|----------|--------------|-------------------|-------------|
+| **Claude** | Claude Pro/Max (Claude Code OAuth) | `claude-opus-4-8`, `claude-sonnet-4-6`, … | Anthropic Messages API |
+| **Codex** | ChatGPT Plus/Pro (OpenAI Codex OAuth) | `gpt-5.2`, … | OpenAI Responses API (`chatgpt.com/backend-api/codex`) |
+| **Grok** | SuperGrok / Premium+ (xAI OAuth) | `grok-4.3`, … | xAI OpenAI-compatible API (`api.x.ai`) |
+
+The proxy routes **by the requested model name** (`claude-*`→Claude,
+`gpt-*`/`o*`/`codex-*`→Codex, `grok-*`→Grok), so one endpoint serves all three.
+`GET /v1/models` lists only the subscriptions you're actually logged into,
+fetched **live** from each provider. Each provider runs its own
+Authorization-Code + PKCE login using that vendor's official public client
+identity (the subscription backends only honor it). Translation is done in-process:
+OpenAI↔Anthropic for Claude, OpenAI-Chat↔Responses for Codex; Grok is a
+near-passthrough (xAI is natively OpenAI-compatible).
 
 ## Scope
 
@@ -35,19 +45,25 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -e .            # or: pip install -e '.[dev]' to run tests
 ```
 
-## Get a token
+## Log in to your subscriptions
 
-You need a Claude Code OAuth/subscription token. The proxy reads it from (in
-order) the macOS Keychain (`Claude Code-credentials`),
-`~/.claude/.credentials.json`, or the `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_TOKEN`
-environment variables. The simplest way to create one:
+Log into whichever providers you want; the catalog and routing adjust
+automatically. Tokens are stored under `~/.oauth-proxy/` (mode 0600) and
+refreshed automatically.
 
 ```bash
-claude setup-token        # requires the `claude` CLI installed and logged in
+oauth-proxy login codex     # ChatGPT Plus/Pro — opens browser, PKCE login
+oauth-proxy login grok      # SuperGrok / Premium+ — opens browser, PKCE login
 ```
 
-When the stored token expires, the proxy refreshes it automatically (if a
-refresh token is present).
+**Claude** is read from your existing Claude Code login (no separate command):
+the macOS Keychain (`Claude Code-credentials`), `~/.claude/.credentials.json`, or
+the `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_TOKEN` env vars. Create one with
+`claude setup-token` (requires the `claude` CLI logged in).
+
+> **Note on Grok:** xAI gates OAuth/API access by SuperGrok tier *server-side*.
+> A valid login can still get `403` at inference if your tier isn't entitled —
+> that's an xAI entitlement wall, not a proxy bug.
 
 ## Run
 
@@ -74,33 +90,47 @@ when the package is imported (so tests never pick up a developer's `.env`).
 | `PROXY_HOST` | `127.0.0.1` | Bind host |
 | `PROXY_PORT` | `8787` | Bind port |
 | `PROXY_API_KEY` | _(unset)_ | If set, clients must send `Authorization: Bearer <key>` |
-| `DEFAULT_MODEL` | `claude-opus-4-8` | Substituted when a client requests a non-Claude model (e.g. `gpt-4o`) |
+| `PROXY_DEFAULT_PROVIDER` | `anthropic` | Backend for an unrecognized model name (`anthropic`/`codex`/`grok`) |
+| `DEFAULT_MODEL` | `claude-opus-4-8` | Claude model substituted for an unknown name routed to Anthropic |
+| `CODEX_DEFAULT_MODEL` | `gpt-5.2` | Codex model substituted for a non-OpenAI name routed to Codex |
+| `GROK_DEFAULT_MODEL` | `grok-4.3` | Grok model substituted for a non-Grok name routed to Grok |
 | `DEFAULT_REASONING_EFFORT` | `off` | `off`/`low`/`medium`/`high`/`xhigh`/`max` — extended-thinking effort |
-| `PROXY_INCLUDE_REASONING` | `false` | Surface Claude thinking as a non-standard `reasoning_content` field |
+| `PROXY_INCLUDE_REASONING` | `false` | Surface model thinking as a non-standard `reasoning_content` field |
 | `PROXY_REQUEST_TIMEOUT` | `900` | Upstream read timeout (seconds) |
 
 ## Use it
 
+Just change the `model` to pick the backend — same endpoint, any OpenAI client:
+
 ```bash
-curl http://127.0.0.1:8787/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"claude-opus-4-7","messages":[{"role":"user","content":"Say hi"}]}'
+# Claude (Anthropic)
+curl http://127.0.0.1:8787/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"claude-opus-4-8","messages":[{"role":"user","content":"Say hi"}]}'
+
+# Codex (ChatGPT subscription)
+curl http://127.0.0.1:8787/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-5.2","messages":[{"role":"user","content":"Say hi"}]}'
+
+# Grok (SuperGrok)
+curl http://127.0.0.1:8787/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"grok-4.3","messages":[{"role":"user","content":"Say hi"}]}'
 ```
 
 ```python
 from openai import OpenAI
 client = OpenAI(base_url="http://127.0.0.1:8787/v1", api_key="unused")
-resp = client.chat.completions.create(
-    model="claude-opus-4-7",
-    messages=[{"role": "user", "content": "Say hi"}],
-    stream=True,
-)
+resp = client.chat.completions.create(model="gpt-5.2",
+    messages=[{"role": "user", "content": "Say hi"}], stream=True)
 for chunk in resp:
     print(chunk.choices[0].delta.content or "", end="")
 ```
 
-Endpoints: `POST /v1/chat/completions` (stream + non-stream),
-`GET /v1/models`, `GET /health`.
+Endpoints:
+- `POST /v1/chat/completions` — stream + non-stream; routed by model name (all providers).
+- `POST /v1/responses` — native **OpenAI Responses API** for the Responses-native
+  providers (Codex, Grok); the highest-fidelity path.
+- `GET /v1/models` — live catalog of your logged-in subscriptions.
+- `GET /health`.
 
 ## Develop
 

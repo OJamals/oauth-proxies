@@ -48,3 +48,27 @@ SOFTWARE.
 The local shim modules (`oauth_proxy/_vendor/_paths.py`, `utils.py`,
 `tools/schema_sanitizer.py`, `tools/lazy_deps.py`) are original to this
 project and licensed under the project's MIT License (see `LICENSE`).
+
+---
+
+## Codex and Grok providers — provenance of interoperability constants
+
+The Codex (`codex_auth.py`, `codex_client.py`, `codex_*_mapping.py`) and Grok
+(`grok_auth.py`, `grok_client.py`) provider code is **original to this project**
+(MIT, see `LICENSE`); no third-party source is vendored for them.
+
+To interoperate with the providers' subscription backends, this code reuses
+**public, non-secret OAuth client identifiers and endpoint URLs** that those
+backends require — these are interoperability facts, not copyrightable code:
+
+- **Codex / ChatGPT:** the public Codex CLI OAuth client id and
+  `auth.openai.com` / `chatgpt.com/backend-api/codex` endpoints, as published in
+  [openai/codex](https://github.com/openai/codex).
+- **Grok / xAI:** the public Grok-CLI OAuth client id and `auth.x.ai` /
+  `api.x.ai` endpoints, as surfaced in
+  [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) (MIT)
+  and xAI's live OIDC discovery document.
+
+The subscription backends only honor each vendor's official public client, so
+reusing these identifiers is required for the "use your own subscription on your
+own machine" interop case this proxy targets.

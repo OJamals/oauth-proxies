@@ -239,3 +239,33 @@ modifications (identifier neutralization, shim wiring). Update `README.md` and
   is grayer than the narrowly-sanctioned "your own login on your own machine" framing
   the Anthropic path leans on. We keep the same scope guard (localhost, single user)
   and document it in `DESIGN.md`'s ToS section.
+
+## Implementation notes (as built)
+
+Deviations from the plan above, decided during implementation and verified against
+the live backends:
+
+- **Did NOT vendor Hermes' `codex_responses_adapter.py`.** Reading the real source
+  showed it depends on `agent.prompt_builder` and carries multi-provider cruft
+  (xAI/GitHub issuer sealing, tool-leak regexes). Wrote focused, dependency-free
+  converters instead (`codex_request_mapping`/`codex_response_mapping`/
+  `codex_stream_mapping`) — smaller, auditable, no new vendored code.
+  `THIRD_PARTY_NOTICES.md` documents the public OAuth-constant provenance.
+- **Live `/v1/models`.** The catalog is fetched live per logged-in provider
+  (`GET chatgpt.com/backend-api/codex/models?client_version=…` for Codex;
+  `GET api.x.ai/v1/models` for Grok), with curated fallback — not a static list.
+- **Verified Codex facts (live):** the accepted model is **`gpt-5.2`** (the live
+  allowlist; earlier guesses like `gpt-5-codex` are rejected); a non-empty
+  top-level `instructions` is **required**; the finalized output arrives in
+  `response.output_item.done` (the `response.completed` snapshot has empty
+  `output` + usage), so non-stream aggregation reads the per-item `done` events.
+- **Grok is a near-passthrough**, not a translation: `api.x.ai/v1` is natively
+  OpenAI-compatible for both `/chat/completions` and `/responses`, so the Grok
+  provider just injects the bearer and forwards (SSE bytes verbatim).
+- **Shared `oauth_pkce.py`** holds the provider-agnostic PKCE + loopback-capture
+  + JWT helpers used by the Grok login (Codex keeps its own, equivalent copy).
+
+**Verification status:** Codex is **live-verified end-to-end** against a real
+ChatGPT subscription (non-stream, streaming, usage, live model list). Grok is
+unit-tested but **not yet live-verified** — it needs a SuperGrok login and is
+subject to xAI's server-side tier entitlement (`403 subscription_not_entitled`).
