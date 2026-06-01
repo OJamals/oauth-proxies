@@ -179,8 +179,10 @@ def build_responses_body(
     tc = _tool_choice(req)
     if tc is not None:
         body["tool_choice"] = tc
-    if (max_out := req.resolved_max_tokens()) is not None:
-        body["max_output_tokens"] = max_out
+    # NOTE: deliberately do NOT forward max_tokens as ``max_output_tokens`` —
+    # the ChatGPT-subscription Codex backend (chatgpt.com/backend-api/codex)
+    # rejects it with 400 "Unsupported parameter: max_output_tokens" for every
+    # model, so sending it just fails the request.
     effort = (req.reasoning_effort or default_reasoning_effort or "").lower()
     if effort and effort not in _OFF_EFFORTS:
         body["reasoning"] = {"effort": effort}

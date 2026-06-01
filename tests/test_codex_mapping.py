@@ -113,6 +113,18 @@ def test_default_instructions_when_no_system_message():
     assert body["instructions"] == reqm.DEFAULT_INSTRUCTIONS
 
 
+def test_max_tokens_not_forwarded_as_max_output_tokens():
+    """The ChatGPT-subscription Codex backend rejects ``max_output_tokens``
+    (400 Unsupported parameter) for every model, so a client-supplied
+    ``max_tokens`` must NOT be forwarded to it."""
+    body = reqm.build_responses_body(
+        _req(messages=[{"role": "user", "content": "hi"}], max_tokens=16),
+        default_model="gpt-5.2",
+        stream=False,
+    )
+    assert "max_output_tokens" not in body
+
+
 # ── Response mapping (non-stream) ─────────────────────────────────────────────
 
 def test_text_response_maps_to_content():
