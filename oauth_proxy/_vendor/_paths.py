@@ -11,6 +11,11 @@ from pathlib import Path
 
 
 def _app_home() -> Path:
-    """Return the directory used for proxy-managed credential files."""
-    base = os.environ.get("PROXY_HOME")
+    """Return the directory used for proxy-managed credential files.
+
+    Uses ``OAUTH_PROXY_HOME`` — the single home-dir knob shared with
+    ``codex_auth``/``grok_auth`` — falling back to the legacy ``PROXY_HOME``
+    name, then to ``~/.oauth-proxy``.
+    """
+    base = os.environ.get("OAUTH_PROXY_HOME") or os.environ.get("PROXY_HOME")
     return Path(base) if base else Path.home() / ".oauth-proxy"

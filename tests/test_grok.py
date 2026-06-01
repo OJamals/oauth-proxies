@@ -86,6 +86,50 @@ def test_get_token_no_creds_raises(tmp_path, monkeypatch):
         grok_auth.GrokTokenProvider().get_token()
 
 
+# ── Env-var injection (headless / Docker bootstrap) ──────────────────────────
+
+def test_env_refresh_token_seeds_and_caches(monkeypatch):
+    """With no stored JSON, GROK_REFRESH_TOKEN bootstraps a login: the provider
+    refreshes to mint an access token and caches the result to OAUTH_PROXY_HOME."""
+    # conftest already points OAUTH_PROXY_HOME at an empty temp dir.
+    monkeypatch.setenv("GROK_REFRESH_TOKEN", "rt_env")
+    monkeypatch.setenv("GROK_TOKEN_ENDPOINT", "https://auth.x.ai/oauth2/token")
+    assert grok_auth.read_credentials() is None
+
+    seen = {}
+
+    def fake_refresh(endpoint, refresh_token, *, timeout):
+        seen["endpoint"] = endpoint
+        assert refresh_token == "rt_env"
+        return {"access_token": "at_minted", "expires_in": 3600}
+
+    monkeypatch.setattr(grok_auth, "_refresh", fake_refresh)
+    assert grok_auth.GrokTokenProvider().get_token() == "at_minted"
+    assert seen["endpoint"] == "https://auth.x.ai/oauth2/token"  # honored from env
+    stored = grok_auth.read_credentials()
+    assert stored["access_token"] == "at_minted"
+    assert stored["refresh_token"] == "rt_env"
+
+
+def test_stored_json_beats_env_refresh_token(monkeypatch):
+    monkeypatch.setenv("GROK_REFRESH_TOKEN", "rt_env")
+    grok_auth.write_credentials(
+        {"access_token": "live_json", "refresh_token": "rt_json", "expires_at": _future_ms()}
+    )
+
+    def boom(*a, **k):
+        raise AssertionError("must not refresh when a fresh stored token exists")
+
+    monkeypatch.setattr(grok_auth, "_refresh", boom)
+    assert grok_auth.GrokTokenProvider().get_token() == "live_json"
+
+
+def test_is_logged_in_true_with_only_env_refresh_token(monkeypatch):
+    monkeypatch.setenv("GROK_REFRESH_TOKEN", "rt_env")
+    assert grok_auth.read_credentials() is None
+    assert grok_auth.GrokTokenProvider().is_logged_in() is True
+
+
 # ── Endpoint passthrough ──────────────────────────────────────────────────
 
 class _FakeGrokTokens:

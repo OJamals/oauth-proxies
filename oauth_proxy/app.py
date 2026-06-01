@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import time
 import uuid
@@ -686,6 +687,55 @@ def _login_cli(args: list) -> None:
     print(f"✓ {provider} login stored (account_id={acc}). You can now make requests.")
 
 
+def _export_env_lines() -> list:
+    """Build the ``KEY=value`` env lines (plus guidance comments) describing the
+    portable credentials currently in effect on this host.
+
+    Claude's portable form is the long-lived ``setup-token`` in env; Codex/Grok
+    are represented by their long-lived refresh tokens (read from the stored
+    bundle or an existing env seed). Copy the output to another machine's secrets
+    / a Docker env file to migrate without re-running the browser logins.
+    """
+    from oauth_proxy import codex_auth, grok_auth
+
+    lines: list = []
+
+    claude = (
+        os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
+        or os.environ.get("ANTHROPIC_TOKEN", "").strip()
+    )
+    if claude:
+        lines.append(f"CLAUDE_CODE_OAUTH_TOKEN={claude}")
+    else:
+        lines.append("# CLAUDE_CODE_OAUTH_TOKEN not set — mint one with `claude setup-token`")
+
+    crec = codex_auth.read_credentials_or_env() or {}
+    if crec.get("refresh_token"):
+        lines.append(f"CODEX_REFRESH_TOKEN={crec['refresh_token']}")
+        if crec.get("account_id"):
+            lines.append(f"CODEX_ACCOUNT_ID={crec['account_id']}")
+    else:
+        lines.append("# CODEX_REFRESH_TOKEN unavailable — run `oauth-proxy login codex`")
+
+    grec = grok_auth.read_credentials_or_env() or {}
+    if grec.get("refresh_token"):
+        lines.append(f"GROK_REFRESH_TOKEN={grec['refresh_token']}")
+        endpoint = grec.get("token_endpoint")
+        if endpoint and endpoint != grok_auth._TOKEN_FALLBACK:
+            lines.append(f"GROK_TOKEN_ENDPOINT={endpoint}")
+    else:
+        lines.append("# GROK_REFRESH_TOKEN unavailable — run `oauth-proxy login grok`")
+
+    return lines
+
+
+def _export_env_cli() -> None:
+    """``oauth-proxy export-env`` — print portable credential env vars."""
+    load_dotenv()
+    for line in _export_env_lines():
+        print(line)
+
+
 def main() -> None:
     """Console entry point: ``oauth-proxy`` (server) / ``oauth-proxy login ...``."""
     import sys
@@ -693,6 +743,9 @@ def main() -> None:
     argv = sys.argv[1:]
     if argv and argv[0] == "login":
         _login_cli(argv[1:])
+        return
+    if argv and argv[0] == "export-env":
+        _export_env_cli()
         return
 
     import uvicorn

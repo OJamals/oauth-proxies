@@ -17,6 +17,7 @@ import adapter``. Tests monkeypatch ``adapter.<fn>`` to avoid network/keychain.
 """
 from __future__ import annotations
 
+import os
 import time
 from typing import Optional
 
@@ -64,22 +65,36 @@ class TokenProvider:
 
         candidate: Optional[str] = None
         candidate_expires_at_ms: Optional[int] = None
-
-        creds = adapter.read_claude_code_credentials()
         had_expired_creds = False
-        if creds and adapter.is_claude_code_token_valid(creds):
-            candidate = creds.get("accessToken")
-            candidate_expires_at_ms = creds.get("expiresAt") or None
-        elif creds:
-            # Present but expired/invalid — try a refresh (writes back to disk).
-            had_expired_creds = True
-            candidate = adapter._refresh_oauth_token(creds)
-            # A refresh rotates the token; we don't know the new expiry here,
-            # so leave it unknown and let the next call re-validate.
 
-        if not candidate:
-            # Env-var / credential-file fallback resolver.
-            candidate = adapter.resolve_anthropic_token()
+        # An explicitly-set OAuth token wins over the Claude Code credential
+        # store. This makes Claude resolution deterministic and portable (Docker
+        # has no Keychain), and means we never read or refresh — and therefore
+        # never rotate — the Claude Code app's own login. Mirrors
+        # resolve_anthropic_token's env priority (ANTHROPIC_TOKEN first).
+        env_token = (
+            os.environ.get("ANTHROPIC_TOKEN", "").strip()
+            or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
+        )
+        if env_token:
+            candidate = env_token
+            # Expiry unknown (setup-tokens are long-lived); leave it so the
+            # cache treats it as non-fresh and re-resolves on the next call.
+        else:
+            creds = adapter.read_claude_code_credentials()
+            if creds and adapter.is_claude_code_token_valid(creds):
+                candidate = creds.get("accessToken")
+                candidate_expires_at_ms = creds.get("expiresAt") or None
+            elif creds:
+                # Present but expired/invalid — try a refresh (writes back to disk).
+                had_expired_creds = True
+                candidate = adapter._refresh_oauth_token(creds)
+                # A refresh rotates the token; we don't know the new expiry here,
+                # so leave it unknown and let the next call re-validate.
+
+            if not candidate:
+                # Credential-file / ANTHROPIC_API_KEY fallback resolver.
+                candidate = adapter.resolve_anthropic_token()
 
         if not candidate:
             if had_expired_creds:

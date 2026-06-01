@@ -203,6 +203,35 @@ def write_credentials(record: Dict) -> None:
         pass
 
 
+def _record_from_env() -> Optional[Dict]:
+    """Bootstrap a credential record from environment variables.
+
+    Enables headless / Docker startup without an interactive browser login: set
+    ``CODEX_REFRESH_TOKEN`` (and optionally ``CODEX_ACCESS_TOKEN``,
+    ``CODEX_ACCOUNT_ID``, ``CODEX_ID_TOKEN``). ``expires_at`` is left unknown so
+    the provider refreshes on first use and caches the minted record under
+    ``OAUTH_PROXY_HOME``. Returns None when ``CODEX_REFRESH_TOKEN`` is unset.
+    """
+    rt = os.environ.get("CODEX_REFRESH_TOKEN", "").strip()
+    if not rt:
+        return None
+    id_token = os.environ.get("CODEX_ID_TOKEN", "").strip() or None
+    return {
+        "access_token": os.environ.get("CODEX_ACCESS_TOKEN", "").strip() or None,
+        "refresh_token": rt,
+        "id_token": id_token,
+        "account_id": os.environ.get("CODEX_ACCOUNT_ID", "").strip()
+        or _account_id_from_id_token(id_token),
+        "expires_at": None,
+        "token_type": "Bearer",
+    }
+
+
+def read_credentials_or_env() -> Optional[Dict]:
+    """Stored JSON credentials if present, else an env-var bootstrap record."""
+    return read_credentials() or _record_from_env()
+
+
 # ── Token-endpoint I/O ───────────────────────────────────────────────────────
 
 def _post_token(form: Dict[str, str], *, timeout: float) -> Dict:
@@ -352,7 +381,7 @@ class CodexTokenProvider:
         if self._fresh(self._record):
             return self._record["access_token"]  # type: ignore[index]
 
-        record = self._record or read_credentials()
+        record = self._record or read_credentials_or_env()
         if not record:
             raise TokenError(
                 "No Codex OAuth token found. Run `oauth-proxy login codex` to "
@@ -381,12 +410,16 @@ class CodexTokenProvider:
         return refreshed["access_token"]
 
     def is_logged_in(self) -> bool:
-        """Cheap, local check: is a stored Codex credential present? (no network)"""
-        record = self._record or read_credentials()
-        return bool(record and record.get("access_token"))
+        """Cheap, local check: is a Codex credential present? (no network)
+
+        A refresh-token-only env seed counts as logged in: the access token can
+        be minted on demand from it.
+        """
+        record = self._record or read_credentials_or_env()
+        return bool(record and (record.get("access_token") or record.get("refresh_token")))
 
     def account_id(self) -> Optional[str]:
-        record = self._record or read_credentials() or {}
+        record = self._record or read_credentials_or_env() or {}
         return record.get("account_id") or _account_id_from_id_token(record.get("id_token"))
 
     def headers(self) -> Dict[str, str]:

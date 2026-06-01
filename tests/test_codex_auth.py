@@ -160,6 +160,61 @@ def test_get_token_expired_no_refresh_raises(tmp_path, monkeypatch):
         tp.get_token()
 
 
+# ── Env-var injection (headless / Docker bootstrap) ──────────────────────────
+
+def test_env_refresh_token_seeds_and_caches(monkeypatch):
+    """With no stored JSON, CODEX_REFRESH_TOKEN bootstraps a login: the provider
+    mints an access token via refresh and caches the result to OAUTH_PROXY_HOME
+    (so later calls / restarts don't re-seed from env)."""
+    # conftest already points OAUTH_PROXY_HOME at an empty temp dir.
+    monkeypatch.setenv("CODEX_REFRESH_TOKEN", "rt_env")
+    monkeypatch.setenv("CODEX_ACCOUNT_ID", "acc_env")
+    assert codex_auth.read_credentials() is None  # nothing on disk
+
+    def fake_refresh(refresh_token, *, timeout):
+        assert refresh_token == "rt_env"
+        return {"access_token": "at_minted", "expires_in": 3600}
+
+    monkeypatch.setattr(codex_auth, "_refresh", fake_refresh)
+    tp = codex_auth.CodexTokenProvider()
+    assert tp.get_token() == "at_minted"
+
+    stored = codex_auth.read_credentials()
+    assert stored["access_token"] == "at_minted"
+    assert stored["refresh_token"] == "rt_env"   # carried forward from the env seed
+    assert stored["account_id"] == "acc_env"
+
+
+def test_stored_json_beats_env_refresh_token(monkeypatch):
+    """A fresh stored credential is served directly; env vars are not consulted
+    and no refresh happens."""
+    monkeypatch.setenv("CODEX_REFRESH_TOKEN", "rt_env")
+    codex_auth.write_credentials(
+        {"access_token": "live_json", "refresh_token": "rt_json", "expires_at": _future_ms()}
+    )
+
+    def boom(*a, **k):
+        raise AssertionError("must not refresh when a fresh stored token exists")
+
+    monkeypatch.setattr(codex_auth, "_refresh", boom)
+    assert codex_auth.CodexTokenProvider().get_token() == "live_json"
+
+
+def test_is_logged_in_true_with_only_env_refresh_token(monkeypatch):
+    """A refresh-token-only env seed counts as logged in (so /v1/models can
+    advertise Codex) even though no access token is present yet."""
+    monkeypatch.setenv("CODEX_REFRESH_TOKEN", "rt_env")
+    assert codex_auth.read_credentials() is None
+    assert codex_auth.CodexTokenProvider().is_logged_in() is True
+
+
+def test_no_json_no_env_still_raises(monkeypatch):
+    """Neither stored JSON nor env vars -> the usual 'login codex' error."""
+    tp = codex_auth.CodexTokenProvider()
+    with pytest.raises(codex_auth.TokenError, match="login codex"):
+        tp.get_token()
+
+
 def test_headers_include_account_and_originator(tmp_path, monkeypatch):
     monkeypatch.setenv("OAUTH_PROXY_HOME", str(tmp_path))
     codex_auth.write_credentials(

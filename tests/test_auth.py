@@ -122,6 +122,45 @@ def test_no_creds_env_oauth_token_returned(monkeypatch):
     assert calls["_refresh_oauth_token"] == 0
 
 
+def test_env_oauth_token_preferred_over_keychain(monkeypatch):
+    """An explicitly-set CLAUDE_CODE_OAUTH_TOKEN wins over the Keychain and must
+    NOT read or refresh the Claude Code credential store (so the app login is
+    never touched / rotated)."""
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", OAUTH_TOKEN)
+    # Keychain holds a *different*, perfectly valid token — it must be ignored.
+    keychain = {"accessToken": "sk-ant-oat-KEYCHAIN", "refreshToken": "r", "expiresAt": FAR_FUTURE_MS}
+    calls = _install_adapter_stub(
+        monkeypatch,
+        read_claude_code_credentials=keychain,
+        is_claude_code_token_valid=True,
+    )
+    tp = TokenProvider()
+    assert tp.get_token() == OAUTH_TOKEN
+    assert calls["read_claude_code_credentials"] == 0  # keychain never touched
+    assert calls["_refresh_oauth_token"] == 0
+
+
+def test_env_anthropic_token_also_preferred(monkeypatch):
+    """ANTHROPIC_TOKEN is honored the same way (matches resolve_anthropic_token
+    priority) when CLAUDE_CODE_OAUTH_TOKEN is not set."""
+    monkeypatch.setenv("ANTHROPIC_TOKEN", OAUTH_TOKEN)
+    calls = _install_adapter_stub(monkeypatch, read_claude_code_credentials={"x": 1})
+    tp = TokenProvider()
+    assert tp.get_token() == OAUTH_TOKEN
+    assert calls["read_claude_code_credentials"] == 0
+
+
+def test_env_plain_api_key_still_rejected(monkeypatch):
+    """A misconfigured env token that's a plain API key must still raise the
+    clear 'plain API key' error rather than being used."""
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", API_KEY)
+    _install_adapter_stub(monkeypatch)
+    tp = TokenProvider()
+    with pytest.raises(TokenError) as excinfo:
+        tp.get_token()
+    assert "api key" in str(excinfo.value).lower()
+
+
 def test_resolved_token_is_plain_api_key_raises(monkeypatch):
     _install_adapter_stub(
         monkeypatch,
