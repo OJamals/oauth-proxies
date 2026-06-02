@@ -154,32 +154,74 @@ CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
 | `PROXY_PROMPT_CACHE` | `true` | Inject one ephemeral prompt-cache breakpoint on each request's stable prefix (Claude) |
 | `PROXY_REQUEST_TIMEOUT` | `900` | Upstream read timeout (seconds) |
 | `LOG_LEVEL` | `INFO` | Server log verbosity (`DEBUG`/`INFO`/`WARNING`/…) |
+| `OAUTH_PROXY_HOME` | `~/.oauth-proxy` | Directory for proxy-managed credential bundles (legacy name: `PROXY_HOME`) |
+
+Per-provider **credential** env vars (for logging in, or for seeding a login on
+a fresh host) are covered in [Authentication](#authentication) below.
 
 ## Authentication
 
-Tokens for Codex and Grok are stored under `~/.oauth-proxy/` (mode 0600) and
-refreshed automatically. Each provider runs its own Authorization-Code + PKCE
-loopback login using that vendor's official **public** client id (the
+Tokens for Codex and Grok are stored under `OAUTH_PROXY_HOME` (default
+`~/.oauth-proxy/`, mode 0600) and refreshed automatically. Each provider runs
+its own Authorization-Code + PKCE loopback login using that vendor's official
+**public** client id (the
 subscription backends only honor it; these are interoperability identifiers,
 not secrets — see `THIRD_PARTY_NOTICES.md`).
 
-- **Claude** — read from your existing **Claude Code** login; there is no
-  separate `login` command yet. The proxy resolves a token, in order, from the
-  macOS Keychain (`Claude Code-credentials`), `~/.claude/.credentials.json`, or
-  the `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_TOKEN` environment variables (which
-  may come from `.env`). Refreshable Claude Code credentials are refreshed
-  automatically. Mint a token with `claude setup-token` (requires the `claude`
-  CLI logged in). The proxy is OAuth-only: a plain `sk-ant-...` API key is
-  rejected.
+- **Claude** — no separate `login` command yet. The proxy resolves a token in
+  this order: **first** the `ANTHROPIC_TOKEN` / `CLAUDE_CODE_OAUTH_TOKEN`
+  environment variables (which may come from `.env`), **then** your existing
+  **Claude Code** login via the macOS Keychain (`Claude Code-credentials`) or
+  `~/.claude/.credentials.json`. An explicit env token therefore *wins over* the
+  Keychain — making resolution deterministic and Docker-safe (containers have no
+  Keychain), and ensuring the proxy never reads or rotates the Claude Code app's
+  own login. Refreshable Claude Code credentials (when no env token is set) are
+  refreshed automatically. Mint a portable token with `claude setup-token`
+  (requires the `claude` CLI logged in). The proxy is OAuth-only: a plain
+  `sk-ant-...` API key is rejected.
 
 - **Codex** — `oauth-proxy login codex` opens a browser, runs a PKCE login
   against `auth.openai.com`, and stores the bundle at
   `~/.oauth-proxy/.codex_oauth.json`. Inference goes to the ChatGPT-subscription
-  Responses backend at `chatgpt.com/backend-api/codex`.
+  Responses backend at `chatgpt.com/backend-api/codex`. On a fresh host with no
+  stored bundle, set `CODEX_REFRESH_TOKEN` (and optionally `CODEX_ACCESS_TOKEN` /
+  `CODEX_ACCOUNT_ID`) to seed the login without a browser — the proxy exchanges
+  it on first use and caches the minted bundle under `OAUTH_PROXY_HOME`.
 
 - **Grok** — `oauth-proxy login grok` runs a PKCE login against xAI (endpoints
   resolved at runtime from its OIDC discovery document) and stores the bundle at
-  `~/.oauth-proxy/.grok_oauth.json`. Inference goes to `api.x.ai/v1`.
+  `~/.oauth-proxy/.grok_oauth.json`. Inference goes to `api.x.ai/v1`. As with
+  Codex, set `GROK_REFRESH_TOKEN` (and optionally `GROK_ACCESS_TOKEN` /
+  `GROK_TOKEN_ENDPOINT`) to seed the login headlessly on a fresh host.
+
+### Portability and Docker
+
+The proxy can run on a fresh machine or in a container with **no Keychain and no
+browser**. On a host where you're already logged in, dump the portable
+credentials and copy them to the target's secrets store or a Docker env file:
+
+```bash
+oauth-proxy export-env > creds.env     # on the source machine
+#   CLAUDE_CODE_OAUTH_TOKEN=...         # long-lived setup-token
+#   CODEX_REFRESH_TOKEN=...             # refresh tokens (long-lived)
+#   GROK_REFRESH_TOKEN=...
+# then on the target: supply creds.env via --env-file / .env / your secrets store
+```
+
+Only **long-lived** credentials are exported — the setup-token and the refresh
+tokens. On the target, each refresh token is exchanged once on first use and the
+resulting short-lived bundle is cached under `OAUTH_PROXY_HOME`; rotating tokens
+are never written back to `.env`. For Codex and Grok, `export-env` reads the
+refresh token from the stored bundle; for **Claude** it emits
+`CLAUDE_CODE_OAUTH_TOKEN` only if it's already in the environment — it does not
+read the Keychain, so run `claude setup-token` and set the token first if you
+want it exported. The seed/export env vars:
+
+| Var(s) | Provider | Purpose |
+|--------|----------|---------|
+| `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_TOKEN` | Claude | Long-lived setup-token; wins over the Keychain |
+| `CODEX_REFRESH_TOKEN` (+ opt. `CODEX_ACCESS_TOKEN`, `CODEX_ACCOUNT_ID`) | Codex | Seed a login without a browser |
+| `GROK_REFRESH_TOKEN` (+ opt. `GROK_ACCESS_TOKEN`, `GROK_TOKEN_ENDPOINT`) | Grok | Seed a login without a browser |
 
 ## Scope and caveats
 
