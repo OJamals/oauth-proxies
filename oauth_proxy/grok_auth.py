@@ -22,6 +22,7 @@ CONTRACT (app.py and tests depend on these):
 from __future__ import annotations
 
 import secrets
+import threading
 import urllib.parse
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -206,6 +207,8 @@ class GrokTokenProvider:
     def __init__(self, *, timeout: float = 900.0) -> None:
         self.timeout = timeout
         self._record: Optional[Dict] = None
+        # Serialize refresh (xAI rotates refresh tokens); see CodexTokenProvider.
+        self._lock = threading.Lock()
 
     def _fresh(self, record: Optional[Dict]) -> bool:
         return oauth_pkce.record_is_fresh(record, skew_ms=_EXPIRY_SKEW_MS)
@@ -213,31 +216,35 @@ class GrokTokenProvider:
     def get_token(self) -> str:
         if self._fresh(self._record):
             return self._record["access_token"]  # type: ignore[index]
-        record = self._record or read_credentials()
-        if not record:
-            raise TokenError(
-                "No Grok OAuth token found. Run `oauth-proxy login grok` to "
-                "authorize with your SuperGrok subscription."
+        with self._lock:
+            # Re-check under the lock: another thread may have already refreshed.
+            if self._fresh(self._record):
+                return self._record["access_token"]  # type: ignore[index]
+            record = self._record or read_credentials()
+            if not record:
+                raise TokenError(
+                    "No Grok OAuth token found. Run `oauth-proxy login grok` to "
+                    "authorize with your SuperGrok subscription."
+                )
+            if self._fresh(record):
+                self._record = record
+                return record["access_token"]
+            refresh_token = record.get("refresh_token")
+            if not refresh_token:
+                raise TokenError(
+                    "Grok OAuth token is expired and no refresh token is stored. "
+                    "Run `oauth-proxy login grok` again."
+                )
+            refreshed = _record_from_token_response(
+                _refresh(record.get("token_endpoint") or _TOKEN_FALLBACK, refresh_token, timeout=self.timeout),
+                prev=record,
+                token_endpoint=record.get("token_endpoint"),
             )
-        if self._fresh(record):
-            self._record = record
-            return record["access_token"]
-        refresh_token = record.get("refresh_token")
-        if not refresh_token:
-            raise TokenError(
-                "Grok OAuth token is expired and no refresh token is stored. "
-                "Run `oauth-proxy login grok` again."
-            )
-        refreshed = _record_from_token_response(
-            _refresh(record.get("token_endpoint") or _TOKEN_FALLBACK, refresh_token, timeout=self.timeout),
-            prev=record,
-            token_endpoint=record.get("token_endpoint"),
-        )
-        if not refreshed.get("access_token"):
-            raise TokenError("Grok token refresh failed. Run `oauth-proxy login grok` again.")
-        write_credentials(refreshed)
-        self._record = refreshed
-        return refreshed["access_token"]
+            if not refreshed.get("access_token"):
+                raise TokenError("Grok token refresh failed. Run `oauth-proxy login grok` again.")
+            write_credentials(refreshed)
+            self._record = refreshed
+            return refreshed["access_token"]
 
     def is_logged_in(self) -> bool:
         record = self._record or read_credentials()

@@ -17,6 +17,7 @@ import adapter``. Tests monkeypatch ``adapter.<fn>`` to avoid network/keychain.
 """
 from __future__ import annotations
 
+import threading
 import time
 from typing import Optional
 
@@ -38,6 +39,8 @@ class TokenProvider:
         # re-hit the keychain / trigger a refresh on every request.
         self._token: Optional[str] = None
         self._expires_at_ms: Optional[int] = None
+        # Serialize resolve/refresh across FastAPI worker threads.
+        self._lock = threading.Lock()
 
     def _cache_is_fresh(self) -> bool:
         """True if the cached token can still be served without re-resolving."""
@@ -59,6 +62,14 @@ class TokenProvider:
         when nothing usable can be resolved or the resolved credential is a
         plain API key.
         """
+        if self._cache_is_fresh():
+            return self._token  # type: ignore[return-value]
+
+        with self._lock:
+            return self._resolve_locked()
+
+    def _resolve_locked(self) -> str:
+        # Re-check under the lock: another thread may have resolved while we waited.
         if self._cache_is_fresh():
             return self._token  # type: ignore[return-value]
 

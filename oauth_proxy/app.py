@@ -222,7 +222,9 @@ def build_app(
 
         # Non-streaming.
         try:
-            message = client.messages.create(**kwargs)
+            message = _retry_upstream(
+                lambda: client.messages.create(**kwargs), provider="anthropic"
+            )
         except Exception as exc:
             status, etype, code = _classify_upstream_error(exc)
             log.warning("← %s %s (%dms)", status, etype, int((time.monotonic() - t0) * 1000))
@@ -409,6 +411,34 @@ def _classify_upstream_error(exc: Exception):
     return _classify_error(exc)
 
 
+# Transient upstream statuses worth a retry (mirrors auth2api's proxyWithRetry).
+_RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+_MAX_RETRIES = 2  # up to 3 total attempts
+
+
+def _retry_upstream(call, *, provider: str, sleep=time.sleep):
+    """Call a non-streaming upstream fn, retrying transient failures.
+
+    Retries only on ``_RETRYABLE_STATUSES`` (429/5xx) with linear backoff; any
+    other exception — client errors (4xx), auth errors, non-HTTP failures — is
+    re-raised immediately so the caller's error classifier handles it. Streaming
+    responses are NOT retried here (a mid-stream failure can't be safely
+    replayed once bytes have been sent)."""
+    attempt = 0
+    while True:
+        try:
+            return call()
+        except Exception as exc:
+            status = getattr(exc, "status_code", None)
+            if attempt >= _MAX_RETRIES or status not in _RETRYABLE_STATUSES:
+                raise
+            attempt += 1
+            log.warning(
+                "retry %d/%d provider=%s after status=%s", attempt, _MAX_RETRIES, provider, status
+            )
+            sleep(attempt * 0.5)
+
+
 def _sse_error_line(*, message: str, etype: str, code: Optional[str], include_param: bool) -> str:
     """Build one SSE ``data: {"error": ...}`` line for a mid-stream failure."""
     err: Dict[str, Any] = {"message": message, "type": etype, "code": code}
@@ -492,10 +522,13 @@ def _codex_chat(cfg: Config, tokens, req: ChatCompletionRequest, *, completion_i
         )
 
     try:
-        final = codex_client.collect_final(
-            codex_client.stream_events(
-                body, auth_headers=auth_headers, timeout=cfg.request_timeout_seconds
-            )
+        final = _retry_upstream(
+            lambda: codex_client.collect_final(
+                codex_client.stream_events(
+                    body, auth_headers=auth_headers, timeout=cfg.request_timeout_seconds
+                )
+            ),
+            provider="codex",
         )
     except Exception as exc:
         status, etype, code = _classify_codex_error(exc)
@@ -543,8 +576,13 @@ def _codex_responses(cfg: Config, tokens, raw: Dict[str, Any]):
         )
 
     try:
-        final = codex_client.collect_final(
-            codex_client.stream_events(body, auth_headers=auth_headers, timeout=cfg.request_timeout_seconds)
+        final = _retry_upstream(
+            lambda: codex_client.collect_final(
+                codex_client.stream_events(
+                    body, auth_headers=auth_headers, timeout=cfg.request_timeout_seconds
+                )
+            ),
+            provider="codex",
         )
     except Exception as exc:
         status, etype, code = _classify_codex_error(exc)
@@ -602,8 +640,12 @@ def _grok_chat(cfg: Config, tokens, req: ChatCompletionRequest, raw: Dict[str, A
         )
 
     try:
-        out = grok_client.post_json(
-            "/chat/completions", body, auth_headers=auth_headers, timeout=cfg.request_timeout_seconds
+        out = _retry_upstream(
+            lambda: grok_client.post_json(
+                "/chat/completions", body, auth_headers=auth_headers,
+                timeout=cfg.request_timeout_seconds,
+            ),
+            provider="grok",
         )
     except Exception as exc:
         status, etype, code = _classify_grok_error(exc)
@@ -641,8 +683,12 @@ def _grok_responses(cfg: Config, tokens, raw: Dict[str, Any]):
         )
 
     try:
-        out = grok_client.post_json(
-            "/responses", body, auth_headers=auth_headers, timeout=cfg.request_timeout_seconds
+        out = _retry_upstream(
+            lambda: grok_client.post_json(
+                "/responses", body, auth_headers=auth_headers,
+                timeout=cfg.request_timeout_seconds,
+            ),
+            provider="grok",
         )
     except Exception as exc:
         status, etype, code = _classify_grok_error(exc)
@@ -661,8 +707,12 @@ def _grok_images(cfg: Config, tokens, raw: Dict[str, Any]):
         body["model"] = "grok-imagine-image"
     log.info("→ POST /v1/images/generations provider=grok model=%s", body.get("model"))
     try:
-        out = grok_client.post_json(
-            "/images/generations", body, auth_headers=auth_headers, timeout=cfg.request_timeout_seconds
+        out = _retry_upstream(
+            lambda: grok_client.post_json(
+                "/images/generations", body, auth_headers=auth_headers,
+                timeout=cfg.request_timeout_seconds,
+            ),
+            provider="grok",
         )
     except Exception as exc:
         status, etype, code = _classify_grok_error(exc)

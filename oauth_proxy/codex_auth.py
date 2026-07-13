@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import threading
 import urllib.parse
 from pathlib import Path
 from typing import Dict, Optional
@@ -240,6 +241,11 @@ class CodexTokenProvider:
     def __init__(self, *, timeout: float = 900.0) -> None:
         self.timeout = timeout
         self._record: Optional[Dict] = None
+        # Serialize refresh: the Codex backend ROTATES the refresh token on every
+        # refresh, so two concurrent refreshes would each invalidate the other's
+        # token and can get the account revoked. FastAPI runs endpoints in worker
+        # threads sharing this provider, so a lock is required.
+        self._lock = threading.Lock()
 
     def _fresh(self, record: Optional[Dict]) -> bool:
         return oauth_pkce.record_is_fresh(record, skew_ms=_EXPIRY_SKEW_MS)
@@ -253,33 +259,39 @@ class CodexTokenProvider:
         if self._fresh(self._record):
             return self._record["access_token"]  # type: ignore[index]
 
-        record = self._record or read_credentials()
-        if not record:
-            raise TokenError(
-                "No Codex OAuth token found. Run `oauth-proxy login codex` to "
-                "authorize with your ChatGPT subscription."
-            )
+        with self._lock:
+            # Re-check under the lock: another thread may have refreshed while we
+            # waited, so we serve its result instead of refreshing again.
+            if self._fresh(self._record):
+                return self._record["access_token"]  # type: ignore[index]
 
-        if self._fresh(record):
-            self._record = record
-            return record["access_token"]
+            record = self._record or read_credentials()
+            if not record:
+                raise TokenError(
+                    "No Codex OAuth token found. Run `oauth-proxy login codex` to "
+                    "authorize with your ChatGPT subscription."
+                )
 
-        refresh_token = record.get("refresh_token")
-        if not refresh_token:
-            raise TokenError(
-                "Codex OAuth token is expired and no refresh token is stored. "
-                "Run `oauth-proxy login codex` again."
+            if self._fresh(record):
+                self._record = record
+                return record["access_token"]
+
+            refresh_token = record.get("refresh_token")
+            if not refresh_token:
+                raise TokenError(
+                    "Codex OAuth token is expired and no refresh token is stored. "
+                    "Run `oauth-proxy login codex` again."
+                )
+            refreshed = _record_from_token_response(
+                _refresh(refresh_token, timeout=self.timeout), prev=record
             )
-        refreshed = _record_from_token_response(
-            _refresh(refresh_token, timeout=self.timeout), prev=record
-        )
-        if not refreshed.get("access_token"):
-            raise TokenError(
-                "Codex token refresh failed. Run `oauth-proxy login codex` again."
-            )
-        write_credentials(refreshed)
-        self._record = refreshed
-        return refreshed["access_token"]
+            if not refreshed.get("access_token"):
+                raise TokenError(
+                    "Codex token refresh failed. Run `oauth-proxy login codex` again."
+                )
+            write_credentials(refreshed)
+            self._record = refreshed
+            return refreshed["access_token"]
 
     def is_logged_in(self) -> bool:
         """Cheap, local check: is a stored Codex credential present? (no network)"""
