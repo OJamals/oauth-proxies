@@ -24,25 +24,21 @@ CONTRACT (app.py and tests depend on these):
     def login(*, open_browser: bool = True, timeout: float = 180.0) -> dict: ...
 
 Pure helpers (``_generate_pkce``, ``_build_authorize_url``,
-``_account_id_from_id_token``, ``_decode_jwt_segment``) take no I/O and are unit
-tested directly.
+``_account_id_from_id_token``) take no I/O and are unit tested directly.
+PKCE generation, JWT-segment decoding, and the loopback callback server are
+shared with Grok via ``oauth_pkce``.
 """
 from __future__ import annotations
 
-import base64
-import hashlib
 import json
-import os
 import secrets
-import threading
-import time
 import urllib.parse
-import webbrowser
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 import httpx
+
+from oauth_proxy import oauth_pkce
 
 # ── Verified public Codex CLI OAuth constants (openai/codex, main) ──────────
 # codex-rs/login/src/auth/manager.rs: CLIENT_ID
@@ -89,15 +85,8 @@ class TokenError(RuntimeError):
 
 # ── Pure helpers (no I/O — unit tested directly) ────────────────────────────
 
-def _b64url(raw: bytes) -> str:
-    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
-
-
-def _generate_pkce() -> Tuple[str, str]:
-    """Return (code_verifier, code_challenge) for PKCE S256."""
-    verifier = _b64url(os.urandom(64))[:128]
-    challenge = _b64url(hashlib.sha256(verifier.encode("ascii")).digest())
-    return verifier, challenge
+# Shared PKCE generator (identical S256 logic Grok's login uses).
+_generate_pkce = oauth_pkce.generate_pkce
 
 
 def _build_authorize_url(*, redirect_uri: str, code_challenge: str, state: str) -> str:
@@ -117,22 +106,12 @@ def _build_authorize_url(*, redirect_uri: str, code_challenge: str, state: str) 
     return AUTHORIZE_ENDPOINT + "?" + urllib.parse.urlencode(params)
 
 
-def _decode_jwt_segment(token: str) -> Dict:
-    """Decode (without verifying) the payload segment of a JWT into a dict."""
-    parts = token.split(".")
-    if len(parts) < 2:
-        raise ValueError("not a JWT (missing payload segment)")
-    payload = parts[1]
-    payload += "=" * (-len(payload) % 4)  # restore base64 padding
-    return json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
-
-
 def _account_id_from_id_token(id_token: Optional[str]) -> Optional[str]:
     """Extract ``chatgpt_account_id`` from the id_token's auth claim, if present."""
     if not id_token:
         return None
     try:
-        claims = _decode_jwt_segment(id_token)
+        claims = oauth_pkce.decode_jwt_segment(id_token)
     except (ValueError, json.JSONDecodeError):
         return None
     auth = claims.get(_AUTH_CLAIM)
@@ -140,14 +119,6 @@ def _account_id_from_id_token(id_token: Optional[str]) -> Optional[str]:
         acc = auth.get("chatgpt_account_id")
         return acc if isinstance(acc, str) and acc else None
     return None
-
-
-def _expires_at_ms(expires_in: Optional[float], *, now_ms: Optional[int] = None) -> Optional[int]:
-    """Convert an OAuth ``expires_in`` (seconds) into an absolute epoch-ms expiry."""
-    if not expires_in:
-        return None
-    base = now_ms if now_ms is not None else int(time.time() * 1000)
-    return base + int(float(expires_in) * 1000)
 
 
 def _record_from_token_response(
@@ -167,40 +138,25 @@ def _record_from_token_response(
         "refresh_token": refresh_token,
         "id_token": id_token,
         "account_id": account_id,
-        "expires_at": _expires_at_ms(data.get("expires_in"), now_ms=now_ms),
+        "expires_at": oauth_pkce.expires_at_ms(data.get("expires_in"), now_ms=now_ms),
         "token_type": data.get("token_type") or "Bearer",
     }
 
 
 # ── Storage ─────────────────────────────────────────────────────────────────
 
-def _app_home() -> Path:
-    return Path(os.environ.get("OAUTH_PROXY_HOME") or (Path.home() / ".oauth-proxy"))
-
-
 def _store_path() -> Path:
-    return _app_home() / ".codex_oauth.json"
+    return oauth_pkce.app_home() / ".codex_oauth.json"
 
 
 def read_credentials() -> Optional[Dict]:
     """Read the persisted Codex OAuth record, or None if absent/unreadable."""
-    p = _store_path()
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return None
+    return oauth_pkce.read_json_credentials(_store_path())
 
 
 def write_credentials(record: Dict) -> None:
     """Persist the Codex OAuth record with owner-only permissions (0600)."""
-    home = _app_home()
-    home.mkdir(parents=True, exist_ok=True)
-    p = _store_path()
-    p.write_text(json.dumps(record, indent=2), encoding="utf-8")
-    try:
-        os.chmod(p, 0o600)
-    except OSError:
-        pass
+    oauth_pkce.write_json_credentials(_store_path(), record)
 
 
 # ── Token-endpoint I/O ───────────────────────────────────────────────────────
@@ -243,45 +199,6 @@ def _refresh(refresh_token: str, *, timeout: float) -> Dict:
 
 # ── Loopback PKCE login ──────────────────────────────────────────────────────
 
-class _CallbackHandler(BaseHTTPRequestHandler):
-    # Set by login() before serving.
-    captured: Dict[str, str] = {}
-
-    def do_GET(self) -> None:  # noqa: N802 (stdlib name)
-        parsed = urllib.parse.urlparse(self.path)
-        if parsed.path != _REDIRECT_PATH:
-            self.send_response(404)
-            self.end_headers()
-            return
-        query = urllib.parse.parse_qs(parsed.query)
-        type(self).captured = {k: v[0] for k, v in query.items()}
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(
-            b"<html><body><h2>Codex login complete.</h2>"
-            b"<p>You can close this tab and return to the terminal.</p></body></html>"
-        )
-
-    def log_message(self, *args) -> None:  # silence stdlib request logging
-        return
-
-
-def _bind_callback_server() -> Tuple[HTTPServer, str]:
-    """Bind the loopback callback server, trying each allowlisted port in turn."""
-    last_err: Optional[OSError] = None
-    for port in _REDIRECT_PORTS:
-        try:
-            server = HTTPServer(("127.0.0.1", port), _CallbackHandler)
-        except OSError as exc:  # port busy
-            last_err = exc
-            continue
-        return server, f"http://localhost:{port}{_REDIRECT_PATH}"
-    raise TokenError(
-        f"could not bind the OAuth callback server on ports {_REDIRECT_PORTS}: {last_err}"
-    )
-
-
 def login(*, open_browser: bool = True, timeout: float = 180.0) -> Dict:
     """Run the interactive PKCE loopback login and persist the token bundle.
 
@@ -291,32 +208,21 @@ def login(*, open_browser: bool = True, timeout: float = 180.0) -> Dict:
     """
     verifier, challenge = _generate_pkce()
     state = secrets.token_urlsafe(32)
-    server, redirect_uri = _bind_callback_server()
-    _CallbackHandler.captured = {}
 
-    url = _build_authorize_url(redirect_uri=redirect_uri, code_challenge=challenge, state=state)
-    print(f"Opening browser for Codex (ChatGPT) login:\n  {url}\n")
-    if open_browser:
-        try:
-            webbrowser.open(url)
-        except Exception:  # pragma: no cover - headless/no browser
-            print("(could not open a browser automatically — open the URL above manually)")
-
-    thread = threading.Thread(target=server.handle_request, daemon=True)
-    thread.start()
-    thread.join(timeout)
-    server.server_close()
-
-    captured = _CallbackHandler.captured
-    if not captured:
-        raise TokenError("login timed out waiting for the OAuth redirect")
-    if captured.get("state") != state:
-        raise TokenError("OAuth state mismatch (possible CSRF) — aborting")
-    if "error" in captured:
-        raise TokenError(f"authorization failed: {captured.get('error')}")
-    code = captured.get("code")
-    if not code:
-        raise TokenError("no authorization code in the OAuth redirect")
+    try:
+        code, redirect_uri = oauth_pkce.capture_redirect(
+            redirect_host="localhost",
+            ports=_REDIRECT_PORTS,
+            path=_REDIRECT_PATH,
+            build_authorize_url=lambda ru: _build_authorize_url(
+                redirect_uri=ru, code_challenge=challenge, state=state
+            ),
+            expected_state=state,
+            open_browser=open_browser,
+            timeout=timeout,
+        )
+    except oauth_pkce.OAuthLoopbackError as exc:
+        raise TokenError(str(exc))
 
     token_resp = _exchange_code(
         code=code, verifier=verifier, redirect_uri=redirect_uri, timeout=timeout
@@ -336,12 +242,7 @@ class CodexTokenProvider:
         self._record: Optional[Dict] = None
 
     def _fresh(self, record: Optional[Dict]) -> bool:
-        if not record or not record.get("access_token"):
-            return False
-        exp = record.get("expires_at")
-        if exp is None:
-            return False  # unknown expiry — re-resolve to be safe
-        return int(time.time() * 1000) < (int(exp) - _EXPIRY_SKEW_MS)
+        return oauth_pkce.record_is_fresh(record, skew_ms=_EXPIRY_SKEW_MS)
 
     def get_token(self) -> str:
         """Resolve a valid Codex access token, refreshing if needed.

@@ -21,15 +21,14 @@ CONTRACT (app.py and tests depend on these):
 """
 from __future__ import annotations
 
-import os
 import secrets
-import time
 import urllib.parse
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 import httpx
 
+from oauth_proxy import oauth_pkce
 from oauth_proxy.oauth_pkce import (
     OAuthLoopbackError,
     capture_redirect,
@@ -63,13 +62,6 @@ class TokenError(RuntimeError):
 
 # ── Pure helpers ──────────────────────────────────────────────────────────
 
-def _expires_at_ms(expires_in: Optional[float], *, now_ms: Optional[int] = None) -> Optional[int]:
-    if not expires_in:
-        return None
-    base = now_ms if now_ms is not None else int(time.time() * 1000)
-    return base + int(float(expires_in) * 1000)
-
-
 def _build_authorize_url(
     authorize_endpoint: str, *, redirect_uri: str, code_challenge: str, state: str, nonce: str
 ) -> str:
@@ -97,7 +89,7 @@ def _record_from_token_response(
         "access_token": data.get("access_token"),
         "refresh_token": data.get("refresh_token") or prev.get("refresh_token"),
         "id_token": data.get("id_token") or prev.get("id_token"),
-        "expires_at": _expires_at_ms(data.get("expires_in"), now_ms=now_ms),
+        "expires_at": oauth_pkce.expires_at_ms(data.get("expires_in"), now_ms=now_ms),
         "token_endpoint": token_endpoint or prev.get("token_endpoint") or _TOKEN_FALLBACK,
         "token_type": data.get("token_type") or "Bearer",
     }
@@ -105,32 +97,16 @@ def _record_from_token_response(
 
 # ── Storage ─────────────────────────────────────────────────────────────────
 
-def _app_home() -> Path:
-    return Path(os.environ.get("OAUTH_PROXY_HOME") or (Path.home() / ".oauth-proxy"))
-
-
 def _store_path() -> Path:
-    return _app_home() / ".grok_oauth.json"
+    return oauth_pkce.app_home() / ".grok_oauth.json"
 
 
 def read_credentials() -> Optional[Dict]:
-    import json
-    try:
-        return json.loads(_store_path().read_text(encoding="utf-8"))
-    except (FileNotFoundError, ValueError, OSError):
-        return None
+    return oauth_pkce.read_json_credentials(_store_path())
 
 
 def write_credentials(record: Dict) -> None:
-    import json
-    home = _app_home()
-    home.mkdir(parents=True, exist_ok=True)
-    p = _store_path()
-    p.write_text(json.dumps(record, indent=2), encoding="utf-8")
-    try:
-        os.chmod(p, 0o600)
-    except OSError:
-        pass
+    oauth_pkce.write_json_credentials(_store_path(), record)
 
 
 # ── Token-endpoint I/O ───────────────────────────────────────────────────────
@@ -232,12 +208,7 @@ class GrokTokenProvider:
         self._record: Optional[Dict] = None
 
     def _fresh(self, record: Optional[Dict]) -> bool:
-        if not record or not record.get("access_token"):
-            return False
-        exp = record.get("expires_at")
-        if exp is None:
-            return False
-        return int(time.time() * 1000) < (int(exp) - _EXPIRY_SKEW_MS)
+        return oauth_pkce.record_is_fresh(record, skew_ms=_EXPIRY_SKEW_MS)
 
     def get_token(self) -> str:
         if self._fresh(self._record):

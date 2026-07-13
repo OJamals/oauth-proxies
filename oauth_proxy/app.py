@@ -372,43 +372,61 @@ def _stream_sse(
         # error event so the client sees what happened.
         _status, etype, code = _classify_upstream_error(exc)
         log.warning("stream error: %s: %s", etype, exc)
-        err = {"error": {"message": str(exc), "type": etype, "param": None, "code": code}}
-        yield f"data: {json.dumps(err)}\n\n"
+        yield _sse_error_line(message=str(exc), etype=etype, code=code, include_param=True)
     yield "data: [DONE]\n\n"
+
+
+_STATUS_MAP = {
+    401: ("authentication_error", "invalid_oauth_token"),
+    429: ("rate_limit_error", "rate_limit_exceeded"),
+}
+
+
+def _classify_error(exc: Exception, *, token_error_cls=None, extra_status_map=None):
+    """Map an upstream exception to (http_status, openai_error_type, code).
+
+    ``token_error_cls`` (a provider's ``TokenError``) short-circuits to a 401
+    auth error. ``extra_status_map`` merges in provider-specific status codes
+    (e.g. Codex/Grok's 403 -> subscription_not_entitled) on top of the shared
+    401/429 mapping.
+    """
+    if token_error_cls is not None and isinstance(exc, token_error_cls):
+        return 401, "authentication_error", "oauth_token_unavailable"
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        table = {**_STATUS_MAP, **(extra_status_map or {})}
+        if status in table:
+            etype, code = table[status]
+            return status, etype, code
+        if 400 <= status < 500:
+            return status, "invalid_request_error", None
+        return status, "api_error", None
+    return 502, "api_error", "upstream_error"
 
 
 def _classify_upstream_error(exc: Exception):
     """Map an Anthropic SDK exception to (http_status, openai_error_type, code)."""
-    status = getattr(exc, "status_code", None)
-    if isinstance(status, int):
-        if status == 401:
-            return status, "authentication_error", "invalid_oauth_token"
-        if status == 429:
-            return status, "rate_limit_error", "rate_limit_exceeded"
-        if 400 <= status < 500:
-            return status, "invalid_request_error", None
-        return status, "api_error", None
-    return 502, "api_error", "upstream_error"
+    return _classify_error(exc)
+
+
+def _sse_error_line(*, message: str, etype: str, code: Optional[str], include_param: bool) -> str:
+    """Build one SSE ``data: {"error": ...}`` line for a mid-stream failure."""
+    err: Dict[str, Any] = {"message": message, "type": etype, "code": code}
+    if include_param:
+        err["param"] = None
+    return f"data: {json.dumps({'error': err})}\n\n"
 
 
 # ── Codex (ChatGPT-subscription) handlers ────────────────────────────────────
 
+_CODEX_EXTRA_STATUS_MAP = {403: ("permission_error", "subscription_not_entitled")}
+
+
 def _classify_codex_error(exc: Exception):
     """Map a Codex transport/auth exception to (http_status, openai_type, code)."""
-    if isinstance(exc, codex_auth.TokenError):
-        return 401, "authentication_error", "oauth_token_unavailable"
-    status = getattr(exc, "status_code", None)
-    if isinstance(status, int):
-        if status == 401:
-            return status, "authentication_error", "invalid_oauth_token"
-        if status == 403:
-            return status, "permission_error", "subscription_not_entitled"
-        if status == 429:
-            return status, "rate_limit_error", "rate_limit_exceeded"
-        if 400 <= status < 500:
-            return status, "invalid_request_error", None
-        return status, "api_error", None
-    return 502, "api_error", "upstream_error"
+    return _classify_error(
+        exc, token_error_cls=codex_auth.TokenError, extra_status_map=_CODEX_EXTRA_STATUS_MAP
+    )
 
 
 def _codex_stream_sse(
@@ -441,8 +459,7 @@ def _codex_stream_sse(
     except Exception as exc:
         _status, etype, code = _classify_codex_error(exc)
         log.warning("codex stream error: %s: %s", etype, exc)
-        err = {"error": {"message": str(exc), "type": etype, "param": None, "code": code}}
-        yield f"data: {json.dumps(err)}\n\n"
+        yield _sse_error_line(message=str(exc), etype=etype, code=code, include_param=True)
     yield "data: [DONE]\n\n"
 
 
@@ -517,7 +534,7 @@ def _codex_responses(cfg: Config, tokens, raw: Dict[str, Any]):
                     yield f"data: {json.dumps(ev)}\n\n"
             except Exception as exc:
                 _s, etype, code = _classify_codex_error(exc)
-                yield f"data: {json.dumps({'error': {'message': str(exc), 'type': etype, 'code': code}})}\n\n"
+                yield _sse_error_line(message=str(exc), etype=etype, code=code, include_param=False)
             yield "data: [DONE]\n\n"
 
         return StreamingResponse(
@@ -541,22 +558,14 @@ def _codex_responses(cfg: Config, tokens, raw: Dict[str, Any]):
 
 # ── Grok (SuperGrok subscription) handlers ───────────────────────────────────
 
+_GROK_EXTRA_STATUS_MAP = {403: ("permission_error", "subscription_not_entitled")}
+
+
 def _classify_grok_error(exc: Exception):
     """Map a Grok transport/auth exception to (http_status, openai_type, code)."""
-    if isinstance(exc, grok_auth.TokenError):
-        return 401, "authentication_error", "oauth_token_unavailable"
-    status = getattr(exc, "status_code", None)
-    if isinstance(status, int):
-        if status == 401:
-            return status, "authentication_error", "invalid_oauth_token"
-        if status == 403:
-            return status, "permission_error", "subscription_not_entitled"
-        if status == 429:
-            return status, "rate_limit_error", "rate_limit_exceeded"
-        if 400 <= status < 500:
-            return status, "invalid_request_error", None
-        return status, "api_error", None
-    return 502, "api_error", "upstream_error"
+    return _classify_error(
+        exc, token_error_cls=grok_auth.TokenError, extra_status_map=_GROK_EXTRA_STATUS_MAP
+    )
 
 
 def _grok_model(requested: str, default_model: str) -> str:
@@ -585,8 +594,7 @@ def _grok_chat(cfg: Config, tokens, req: ChatCompletionRequest, raw: Dict[str, A
             except Exception as exc:
                 _s, etype, code = _classify_grok_error(exc)
                 log.warning("grok stream error: %s: %s", etype, exc)
-                err = {"error": {"message": str(exc), "type": etype, "param": None, "code": code}}
-                yield f"data: {json.dumps(err)}\n\n".encode()
+                yield _sse_error_line(message=str(exc), etype=etype, code=code, include_param=True).encode()
 
         return StreamingResponse(
             _gen(), media_type="text/event-stream",
@@ -625,8 +633,7 @@ def _grok_responses(cfg: Config, tokens, raw: Dict[str, Any]):
                 )
             except Exception as exc:
                 _s, etype, code = _classify_grok_error(exc)
-                err = {"error": {"message": str(exc), "type": etype, "param": None, "code": code}}
-                yield f"data: {json.dumps(err)}\n\n".encode()
+                yield _sse_error_line(message=str(exc), etype=etype, code=code, include_param=True).encode()
 
         return StreamingResponse(
             _gen(), media_type="text/event-stream",

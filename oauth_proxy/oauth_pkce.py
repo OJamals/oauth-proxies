@@ -9,15 +9,63 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import threading
+import time
 import urllib.parse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from typing import Callable, Dict, Optional, Tuple
 
 
 class OAuthLoopbackError(RuntimeError):
     """Raised when the loopback login fails (timeout, state mismatch, error)."""
+
+
+# ── Credential storage (shared by Codex + Grok token providers) ─────────────
+
+def app_home() -> Path:
+    """Directory for proxy-managed OAuth credential files (``$OAUTH_PROXY_HOME``)."""
+    return Path(os.environ.get("OAUTH_PROXY_HOME") or (Path.home() / ".oauth-proxy"))
+
+
+def read_json_credentials(path: Path) -> Optional[Dict]:
+    """Read a persisted JSON credential record, or None if absent/unreadable."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
+        return None
+
+
+def write_json_credentials(path: Path, record: Dict) -> None:
+    """Persist a JSON credential record with owner-only permissions (0600)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record, indent=2), encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+# ── Token expiry (shared by Codex + Grok token providers) ───────────────────
+
+def expires_at_ms(expires_in: Optional[float], *, now_ms: Optional[int] = None) -> Optional[int]:
+    """Convert an OAuth ``expires_in`` (seconds) into an absolute epoch-ms expiry."""
+    if not expires_in:
+        return None
+    base = now_ms if now_ms is not None else int(time.time() * 1000)
+    return base + int(float(expires_in) * 1000)
+
+
+def record_is_fresh(record: Optional[Dict], *, skew_ms: int) -> bool:
+    """True if ``record``'s access token is valid and not within ``skew_ms`` of expiry."""
+    if not record or not record.get("access_token"):
+        return False
+    exp = record.get("expires_at")
+    if exp is None:
+        return False  # unknown expiry — re-resolve to be safe
+    return int(time.time() * 1000) < (int(exp) - skew_ms)
 
 
 def b64url(raw: bytes) -> str:
