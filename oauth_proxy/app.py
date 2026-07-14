@@ -228,7 +228,7 @@ def build_app(
         except Exception as exc:
             status, etype, code = _classify_upstream_error(exc)
             log.warning("← %s %s (%dms)", status, etype, int((time.monotonic() - t0) * 1000))
-            return _error_response(status, str(exc), etype, code)
+            return _error_response(status, _error_message(exc), etype, code)
 
         dumped = message.model_dump() if hasattr(message, "model_dump") else dict(message)
         log.info(
@@ -374,7 +374,7 @@ def _stream_sse(
         # error event so the client sees what happened.
         _status, etype, code = _classify_upstream_error(exc)
         log.warning("stream error: %s: %s", etype, exc)
-        yield _sse_error_line(message=str(exc), etype=etype, code=code, include_param=True)
+        yield _sse_error_line(message=_error_message(exc), etype=etype, code=code, include_param=True)
     yield "data: [DONE]\n\n"
 
 
@@ -439,6 +439,41 @@ def _retry_upstream(call, *, provider: str, sleep=time.sleep):
             sleep(attempt * 0.5)
 
 
+def _error_message(exc: Exception) -> str:
+    """Extract a clean, human-readable message from an upstream error.
+
+    The three backends return errors in different JSON dialects — Anthropic/
+    OpenAI ``{"error": {"message": ...}}``, a bare ``{"error": "..."}``, or
+    Codex/xAI ``{"detail": ...}`` — and our HTTP-error exceptions carry the raw
+    body text. Rather than pass that JSON blob to the client as the message,
+    pull out the actual message string. Falls back to ``str(exc)`` unchanged
+    when the body isn't recognizable JSON (e.g. our own TokenError text)."""
+    raw = str(exc)
+    start = raw.find("{")
+    if start == -1:
+        return raw
+    try:
+        data = json.loads(raw[start:])
+    except (ValueError, TypeError):
+        return raw
+    if not isinstance(data, dict):
+        return raw
+    err = data.get("error")
+    if isinstance(err, dict) and isinstance(err.get("message"), str) and err["message"]:
+        return err["message"]
+    if isinstance(err, str) and err:
+        return err
+    detail = data.get("detail")
+    if isinstance(detail, str) and detail:
+        return detail
+    if detail is not None:
+        return json.dumps(detail)
+    msg = data.get("message")
+    if isinstance(msg, str) and msg:
+        return msg
+    return raw
+
+
 def _sse_error_line(*, message: str, etype: str, code: Optional[str], include_param: bool) -> str:
     """Build one SSE ``data: {"error": ...}`` line for a mid-stream failure."""
     err: Dict[str, Any] = {"message": message, "type": etype, "code": code}
@@ -489,7 +524,7 @@ def _codex_stream_sse(
     except Exception as exc:
         _status, etype, code = _classify_codex_error(exc)
         log.warning("codex stream error: %s: %s", etype, exc)
-        yield _sse_error_line(message=str(exc), etype=etype, code=code, include_param=True)
+        yield _sse_error_line(message=_error_message(exc), etype=etype, code=code, include_param=True)
     yield "data: [DONE]\n\n"
 
 
@@ -533,7 +568,7 @@ def _codex_chat(cfg: Config, tokens, req: ChatCompletionRequest, *, completion_i
     except Exception as exc:
         status, etype, code = _classify_codex_error(exc)
         log.warning("← %s codex %s (%dms)", status, etype, int((time.monotonic() - started) * 1000))
-        return _error_response(status, str(exc), etype, code)
+        return _error_response(status, _error_message(exc), etype, code)
 
     if final is None:
         return _error_response(
@@ -567,7 +602,7 @@ def _codex_responses(cfg: Config, tokens, raw: Dict[str, Any]):
                     yield f"data: {json.dumps(ev)}\n\n"
             except Exception as exc:
                 _s, etype, code = _classify_codex_error(exc)
-                yield _sse_error_line(message=str(exc), etype=etype, code=code, include_param=False)
+                yield _sse_error_line(message=_error_message(exc), etype=etype, code=code, include_param=False)
             yield "data: [DONE]\n\n"
 
         return StreamingResponse(
@@ -586,7 +621,7 @@ def _codex_responses(cfg: Config, tokens, raw: Dict[str, Any]):
         )
     except Exception as exc:
         status, etype, code = _classify_codex_error(exc)
-        return _error_response(status, str(exc), etype, code)
+        return _error_response(status, _error_message(exc), etype, code)
     if final is None:
         return _error_response(
             502, "Codex backend returned no completed response.", "api_error", "upstream_error"
@@ -632,7 +667,7 @@ def _grok_chat(cfg: Config, tokens, req: ChatCompletionRequest, raw: Dict[str, A
             except Exception as exc:
                 _s, etype, code = _classify_grok_error(exc)
                 log.warning("grok stream error: %s: %s", etype, exc)
-                yield _sse_error_line(message=str(exc), etype=etype, code=code, include_param=True).encode()
+                yield _sse_error_line(message=_error_message(exc), etype=etype, code=code, include_param=True).encode()
 
         return StreamingResponse(
             _gen(), media_type="text/event-stream",
@@ -650,7 +685,7 @@ def _grok_chat(cfg: Config, tokens, req: ChatCompletionRequest, raw: Dict[str, A
     except Exception as exc:
         status, etype, code = _classify_grok_error(exc)
         log.warning("← %s grok %s", status, etype)
-        return _error_response(status, str(exc), etype, code)
+        return _error_response(status, _error_message(exc), etype, code)
     log.info("← 200 provider=grok model=%s", body["model"])
     return JSONResponse(content=out)
 
@@ -675,7 +710,7 @@ def _grok_responses(cfg: Config, tokens, raw: Dict[str, Any]):
                 )
             except Exception as exc:
                 _s, etype, code = _classify_grok_error(exc)
-                yield _sse_error_line(message=str(exc), etype=etype, code=code, include_param=True).encode()
+                yield _sse_error_line(message=_error_message(exc), etype=etype, code=code, include_param=True).encode()
 
         return StreamingResponse(
             _gen(), media_type="text/event-stream",
@@ -692,7 +727,7 @@ def _grok_responses(cfg: Config, tokens, raw: Dict[str, Any]):
         )
     except Exception as exc:
         status, etype, code = _classify_grok_error(exc)
-        return _error_response(status, str(exc), etype, code)
+        return _error_response(status, _error_message(exc), etype, code)
     return JSONResponse(content=out)
 
 
@@ -717,7 +752,7 @@ def _grok_images(cfg: Config, tokens, raw: Dict[str, Any]):
     except Exception as exc:
         status, etype, code = _classify_grok_error(exc)
         log.warning("← %s grok images %s", status, etype)
-        return _error_response(status, str(exc), etype, code)
+        return _error_response(status, _error_message(exc), etype, code)
     log.info("← 200 provider=grok images model=%s", body.get("model"))
     return JSONResponse(content=out)
 
